@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from lakeducktor import __version__
 from lakeducktor.capabilities import CapabilitiesError, adapter_for
 from lakeducktor.config import ConfigurationError, MetadataConfiguration, load_env_file
+from lakeducktor.inventory import InventoryError, inventory_catalog
 from lakeducktor.lake import BackendDetectionError, detect_metadata_backend
 
 _LOGGER = logging.getLogger("lakeducktor")
@@ -38,6 +38,10 @@ def parser() -> argparse.ArgumentParser:
         "detect-backend",
         help="attach read-only and report the DuckLake metadata backend",
     )
+    actions.add_parser(
+        "inventory",
+        help="collect a read-only inventory of current physical lake state",
+    )
     return command
 
 
@@ -51,25 +55,39 @@ def main(argv: Sequence[str] | None = None) -> int:
         detection = detect_metadata_backend(configuration)
         adapter = adapter_for(detection)
     except (CapabilitiesError, ConfigurationError, BackendDetectionError) as error:
-        print(f"LakeDucktor: {error}", file=sys.stderr)
+        _LOGGER.error("startup_failed error=%s", error)
         return 1
 
-    if len(detection.metadata_schemas) == 1:
-        scope = f"schema={detection.metadata_schemas[0]}"
-    else:
-        scope = f"schemas={len(detection.metadata_schemas)}"
     _LOGGER.info("detected metadata_backend=%s", detection.backend.value)
-    _LOGGER.info("detected %s", scope)
+    _LOGGER.info("detected lakes=%s", len(detection.metadata_schemas))
     _LOGGER.info(
         "selected adapter=%s",
         type(adapter).__name__,
     )
-    for extension in detection.duckdb_extensions:
-        _LOGGER.info(
-            "detected extension=%s version=%s",
-            extension.name,
-            extension.version,
-        )
+    if arguments.command == "inventory":
+        try:
+            inventory = inventory_catalog(configuration, detection)
+        except InventoryError as error:
+            _LOGGER.error("inventory_failed error=%s", error)
+            return 1
+        for lake in inventory.lakes:
+            _LOGGER.info(
+                "detected lake=%s snapshot=%s tables=%s "
+                "active_data_files=%s active_data_bytes=%s "
+                "active_delete_files=%s active_delete_bytes=%s "
+                "dangling_delete_files=%s scheduled_files=%s",
+                lake.metadata_schema,
+                lake.latest_snapshot_id
+                if lake.latest_snapshot_id is not None
+                else "none",
+                lake.table_count,
+                lake.active_data_files,
+                lake.active_data_bytes,
+                lake.active_delete_files,
+                lake.active_delete_bytes,
+                lake.dangling_delete_files,
+                lake.scheduled_files,
+            )
     return 0
 
 

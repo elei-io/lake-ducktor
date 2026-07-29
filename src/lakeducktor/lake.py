@@ -54,6 +54,7 @@ def _loaded_duckdb_extensions(
 def _select_metadata_schemas(
     candidates: Iterable[str],
     configured: str | None,
+    maintained: Iterable[str] = (),
 ) -> tuple[str, ...]:
     available = tuple(sorted(set(candidates)))
     if configured is not None:
@@ -61,10 +62,24 @@ def _select_metadata_schemas(
             raise BackendDetectionError(
                 "METADATA_DATABASE_SCHEMA does not contain a DuckLake catalogue"
             )
-        return (configured,)
+        available = (configured,)
     if not available:
         raise BackendDetectionError(
             "no DuckLake metadata schema was found in the configured database"
+        )
+    requested = tuple(dict.fromkeys(maintained))
+    if requested:
+        missing = sorted(set(requested).difference(available))
+        if missing:
+            names = ", ".join(missing)
+            raise BackendDetectionError(
+                f"MAINTAIN_LAKES contains unknown or excluded lakes: {names}"
+            )
+        requested_set = set(requested)
+        available = tuple(
+            metadata_schema
+            for metadata_schema in available
+            if metadata_schema in requested_set
         )
     return available
 
@@ -73,6 +88,7 @@ def _discover_postgres_schemas(
     connection: duckdb.DuckDBPyConnection,
     postgres_uri: str,
     configured: str | None,
+    maintained: Iterable[str] = (),
 ) -> tuple[str, ...]:
     uri = _sql_string(postgres_uri)
     connection.execute(f"ATTACH '{uri}' AS {_PROBE_ALIAS} (TYPE postgres, READ_ONLY)")
@@ -97,6 +113,7 @@ def _discover_postgres_schemas(
         return _select_metadata_schemas(
             (str(row[0]) for row in rows),
             configured,
+            maintained,
         )
     finally:
         connection.execute(f"DETACH {_PROBE_ALIAS}")
@@ -124,6 +141,7 @@ def detect_metadata_backend(
             connection,
             postgres_uri,
             configuration.schema,
+            configuration.maintain_lakes,
         )
         uri = _sql_string(postgres_uri)
         detected: set[tuple[MetadataBackend, str]] = set()

@@ -31,6 +31,32 @@ def test_configured_metadata_schema_narrows_discovery() -> None:
     )
 
 
+def test_maintain_lakes_filters_discovered_schemas() -> None:
+    assert _select_metadata_schemas(
+        ["lake_a", "lake_b", "lake_c"],
+        configured=None,
+        maintained=("lake_c", "lake_a"),
+    ) == ("lake_a", "lake_c")
+
+
+def test_unknown_maintained_lake_is_rejected() -> None:
+    with pytest.raises(BackendDetectionError, match="unknown.*lake_c"):
+        _select_metadata_schemas(
+            ["lake_a", "lake_b"],
+            configured=None,
+            maintained=("lake_a", "lake_c"),
+        )
+
+
+def test_maintain_lakes_must_respect_explicit_schema() -> None:
+    with pytest.raises(BackendDetectionError, match="excluded.*lake_b"):
+        _select_metadata_schemas(
+            ["lake_a", "lake_b"],
+            configured="lake_a",
+            maintained=("lake_b",),
+        )
+
+
 def test_missing_metadata_schema_is_rejected() -> None:
     with pytest.raises(BackendDetectionError, match="no DuckLake"):
         _select_metadata_schemas([], configured=None)

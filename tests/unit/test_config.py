@@ -38,6 +38,20 @@ def test_invalid_port_is_rejected() -> None:
         )
 
 
+def test_maintain_lakes_is_empty_by_default() -> None:
+    configuration = MetadataConfiguration.from_environment(postgres_environment())
+
+    assert configuration.maintain_lakes == ()
+
+
+def test_maintain_lakes_is_trimmed_and_deduplicated() -> None:
+    configuration = MetadataConfiguration.from_environment(
+        postgres_environment(MAINTAIN_LAKES=" lake_b, lake_a, lake_b, ,")
+    )
+
+    assert configuration.maintain_lakes == ("lake_b", "lake_a")
+
+
 def test_env_file_does_not_override_process_values(tmp_path: Path) -> None:
     path = tmp_path / ".env"
     path.write_text("EXISTING=file\nNEW_VALUE='loaded'\n", encoding="utf-8")

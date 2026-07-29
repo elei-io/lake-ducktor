@@ -55,6 +55,11 @@ def _required(environment: Mapping[str, str], name: str) -> str:
     return value
 
 
+def _comma_separated(environment: Mapping[str, str], name: str) -> tuple[str, ...]:
+    values = (item.strip() for item in environment.get(name, "").split(","))
+    return tuple(dict.fromkeys(item for item in values if item))
+
+
 @dataclass(frozen=True, slots=True)
 class MetadataConfiguration:
     """Inputs required to locate an existing DuckLake metadata catalogue."""
@@ -66,6 +71,7 @@ class MetadataConfiguration:
     password: str
     database: str
     schema: str | None = None
+    maintain_lakes: tuple[str, ...] = ()
 
     @classmethod
     def from_environment(
@@ -102,6 +108,7 @@ class MetadataConfiguration:
             password=_required(values, "METADATA_DATABASE_PASSWORD"),
             database=_required(values, "METADATA_DATABASE_NAME"),
             schema=schema,
+            maintain_lakes=_comma_separated(values, "MAINTAIN_LAKES"),
         )
 
     def postgres_uri(self) -> str:
