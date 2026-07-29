@@ -12,11 +12,12 @@ from lakeducktor.capabilities import CapabilitiesError, adapter_for
 from lakeducktor.config import (
     ConfigurationError,
     MetadataConfiguration,
+    RunConfiguration,
     StorageConfiguration,
     load_env_file,
 )
 from lakeducktor.coordination import PostgresTreatmentCoordinator
-from lakeducktor.daemon import MaintenanceError, maintain_once
+from lakeducktor.daemon import MaintenanceError, RunError, maintain_once, run_service
 from lakeducktor.diagnosis import DiagnosisError, diagnose_inventory
 from lakeducktor.inventory import InventoryError, inventory_catalog
 from lakeducktor.lake import BackendDetectionError, detect_metadata_backend
@@ -70,6 +71,10 @@ def parser() -> argparse.ArgumentParser:
         "maintain",
         help="claim, revalidate, and execute at most one treatment",
     )
+    actions.add_parser(
+        "run",
+        help="continuously discover, select, and execute maintenance",
+    )
     return command
 
 
@@ -82,14 +87,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         configuration = MetadataConfiguration.from_environment()
         envelope = (
             resource_envelope_from_environment()
-            if arguments.command in {"select", "maintain"}
+            if arguments.command in {"select", "maintain", "run"}
             else None
         )
         storage = (
             StorageConfiguration.from_environment()
-            if arguments.command == "maintain"
+            if arguments.command in {"maintain", "run"}
             else None
         )
+        if arguments.command == "run":
+            run_configuration = RunConfiguration.from_environment()
+            assert envelope is not None
+            assert storage is not None
+            try:
+                run_service(
+                    configuration,
+                    storage,
+                    envelope,
+                    run_configuration,
+                )
+            except RunError as error:
+                _LOGGER.error("run_failed error=%s", error)
+                return 1
+            return 0
         detection = detect_metadata_backend(configuration)
         adapter = adapter_for(detection)
     except (CapabilitiesError, ConfigurationError, BackendDetectionError) as error:

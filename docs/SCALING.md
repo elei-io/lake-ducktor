@@ -15,16 +15,16 @@ worker than from additional replicas.
 
 LakeDucktor exposes metrics that distinguish demand from capacity:
 
-- actionable and deferred maintenance debt
-- age of the oldest debt
-- running and waiting work
-- treatment throughput, duration, and outcomes
-- CPU and memory usage and saturation
-- time since successful treatment while debt remains
+- actionable, runnable, blocked, and memory-deferred work
+- scheduled files and dangling delete files
+- running and stuck treatment state
+- treatment throughput, duration, outcomes, and files eliminated
+- estimated merge/rewrite file debt and claim contention
+- worker readiness, liveness, stuck state, and cycle outcomes
 
-Scale out when runnable work and debt age grow despite sustained worker
-utilization. Scale up when individual treatments are resource-bound or cannot
-be admitted safely. Scale in only after runnable work and debt age remain low.
+Scale out when runnable work remains high despite sustained treatment
+throughput. Scale up when work is memory-deferred or individual treatments need
+a larger resource envelope. Scale in after runnable work remains low.
 
 Backlog size alone is insufficient: deferred work may require a larger worker
 rather than more workers, and a healthy lake may correctly have no recent
@@ -32,9 +32,11 @@ treatment.
 
 ## Deployment
 
-LakeDucktor does not manage its own replicas or require a controller. Operators
-can use their existing Kubernetes Deployment and autoscaling stack, exporting
-LakeDucktor's Prometheus metrics through their preferred metrics adapter.
+LakeDucktor does not manage its own replicas or require a controller. Run
+`lakeducktor run` in an ordinary Kubernetes Deployment and use the existing
+autoscaling stack, exporting LakeDucktor's Prometheus metrics through the
+preferred metrics adapter. See [Running](RUNNING.md) for probes and shutdown
+behavior.
 
 Scaling down is safe: terminating workers stop admitting new work, and
 recoverable claims allow unfinished work to be rediscovered. The DuckLake

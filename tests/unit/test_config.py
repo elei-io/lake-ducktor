@@ -5,6 +5,7 @@ import pytest
 from lakeducktor.config import (
     ConfigurationError,
     MetadataConfiguration,
+    RunConfiguration,
     StorageConfiguration,
     load_env_file,
 )
@@ -92,3 +93,43 @@ def test_storage_endpoint_path_is_rejected() -> None:
                 "CATALOG_STORAGE_BUCKET": "lake",
             }
         )
+
+
+def test_run_configuration_defaults_are_boring() -> None:
+    configuration = RunConfiguration.from_environment({})
+
+    assert configuration.poll_interval_seconds == 60
+    assert configuration.treatment_stuck_after_seconds == 3_600
+    assert configuration.metrics_host == "0.0.0.0"
+    assert configuration.metrics_port == 8_000
+
+
+def test_run_configuration_accepts_operational_overrides() -> None:
+    configuration = RunConfiguration.from_environment(
+        {
+            "POLL_INTERVAL_SECONDS": "2.5",
+            "TREATMENT_STUCK_AFTER_SECONDS": "900",
+            "METRICS_HOST": "127.0.0.1",
+            "METRICS_PORT": "9090",
+        }
+    )
+
+    assert configuration.poll_interval_seconds == 2.5
+    assert configuration.treatment_stuck_after_seconds == 900
+    assert configuration.metrics_host == "127.0.0.1"
+    assert configuration.metrics_port == 9_090
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("POLL_INTERVAL_SECONDS", "0"),
+        ("POLL_INTERVAL_SECONDS", "nan"),
+        ("TREATMENT_STUCK_AFTER_SECONDS", "-1"),
+        ("METRICS_HOST", " "),
+        ("METRICS_PORT", "65536"),
+    ],
+)
+def test_invalid_run_configuration_is_rejected(name: str, value: str) -> None:
+    with pytest.raises(ConfigurationError):
+        RunConfiguration.from_environment({name: value})

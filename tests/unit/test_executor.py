@@ -10,12 +10,16 @@ from lakeducktor.model import ResourceEnvelope, TreatmentKind, TreatmentSelectio
 
 
 class FakeConnection:
-    def __init__(self, row: tuple[object, ...] = (4, 2)) -> None:
-        self.row = row
+    def __init__(
+        self,
+        rows: list[tuple[object, ...]] | None = None,
+    ) -> None:
+        self.rows = [(4, 2)] if rows is None else rows
         self.query = ""
         self.parameters: list[object] = []
         self.queries: list[tuple[str, list[object]]] = []
         self.closed = False
+        self.result_exhausted = False
 
     def execute(
         self,
@@ -27,8 +31,9 @@ class FakeConnection:
         self.queries.append((query, self.parameters))
         return self
 
-    def fetchone(self) -> tuple[object, ...]:
-        return self.row
+    def fetchall(self) -> list[tuple[object, ...]]:
+        self.result_exhausted = True
+        return self.rows
 
     def close(self) -> None:
         self.closed = True
@@ -72,6 +77,7 @@ def test_merge_calls_native_function_with_schema_and_bound() -> None:
     ]
     assert result.files_processed == 4
     assert result.files_created == 2
+    assert connection.result_exhausted is True
 
 
 def test_rewrite_calls_native_function_without_overriding_threshold() -> None:
@@ -97,6 +103,21 @@ def test_merge_requires_native_batch_bound() -> None:
             FakeConnection(),
             selection(TreatmentKind.MERGE, max_compacted_files=None),
         )
+
+
+@pytest.mark.parametrize("rows", [[], [(4,)], [(4, 2), (3, 1)]])
+def test_native_result_must_be_fully_drained_to_exactly_one_row(
+    rows: list[tuple[object, ...]],
+) -> None:
+    connection = FakeConnection(rows)
+
+    with pytest.raises(ExecutionError, match="invalid treatment result"):
+        execute_native_treatment(
+            connection,
+            selection(TreatmentKind.MERGE, max_compacted_files=3),
+        )
+
+    assert connection.result_exhausted is True
 
 
 def test_executor_configures_writable_connection_without_exposing_secrets() -> None:
@@ -128,12 +149,15 @@ def test_executor_configures_writable_connection_without_exposing_secrets() -> N
     )
 
     assert result.files_processed == 4
+    assert connection.result_exhausted is True
     assert connection.closed is True
     queries = [query for query, _parameters in connection.queries]
+    assert "PRAGMA disable_checkpoint_on_shutdown" in queries
     assert "SET threads = ?" in queries
     assert "SET memory_limit = ?" in queries
     assert any("CREATE SECRET" in query for query in queries)
     attach = next(query for query in queries if "ATTACH" in query)
     assert "CREATE_IF_NOT_EXISTS false" in attach
     assert "READ_ONLY" not in attach
+    assert not any("DETACH" in query for query in queries)
     assert all("secret" not in query for query in queries)

@@ -528,3 +528,45 @@ def test_maintain_command_logs_verified_treatment_outcome(
         "sorting_enabled=false "
         "table_present=true still_actionable=false claim_contention=1"
     ) in messages
+
+
+def test_run_command_delegates_without_a_one_shot_detection(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    metadata = object()
+    storage = object()
+    envelope = ResourceEnvelope(4, "4GB", 4_000_000_000)
+    run_configuration = object()
+    calls = []
+    monkeypatch.setattr(
+        "lakeducktor.cli.MetadataConfiguration.from_environment",
+        lambda: metadata,
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.StorageConfiguration.from_environment",
+        lambda: storage,
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.resource_envelope_from_environment",
+        lambda: envelope,
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.RunConfiguration.from_environment",
+        lambda: run_configuration,
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.detect_metadata_backend",
+        lambda _configuration: (_ for _ in ()).throw(
+            AssertionError("run must detect inside each cycle")
+        ),
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.run_service",
+        lambda *arguments: calls.append(arguments),
+    )
+
+    result = main(["--env-file", str(tmp_path / "missing"), "run"])
+
+    assert result == 0
+    assert calls == [(metadata, storage, envelope, run_configuration)]

@@ -1,7 +1,11 @@
 import pytest
 
-from lakeducktor.config import MetadataConfiguration, StorageConfiguration
-from lakeducktor.daemon import MaintenanceError, maintain_once
+from lakeducktor.config import (
+    MetadataConfiguration,
+    RunConfiguration,
+    StorageConfiguration,
+)
+from lakeducktor.daemon import MaintenanceError, maintain_once, run_loop
 from lakeducktor.diagnosis import diagnose_inventory
 from lakeducktor.executor import ExecutionError
 from lakeducktor.model import (
@@ -10,9 +14,11 @@ from lakeducktor.model import (
     CompatibleFileGroup,
     FileSizeDistribution,
     LakeInventory,
+    MaintenanceOutcome,
     MaintenanceState,
     MetadataBackend,
     ResourceEnvelope,
+    SelectionReason,
     TableInventory,
     TreatmentResult,
 )
@@ -142,6 +148,95 @@ class InventorySequence:
         return self.inventories.pop(0)
 
 
+class RecordingObserver:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    def cycle_started(self) -> None:
+        self.events.append("cycle_started")
+
+    def cycle_completed(self, outcome: MaintenanceOutcome) -> None:
+        self.events.append(("cycle_completed", outcome.state))
+
+    def cycle_failed(self) -> None:
+        self.events.append("cycle_failed")
+
+    def idle(self, duration_seconds: float) -> None:
+        self.events.append(("idle", duration_seconds))
+
+    def request_stop(self) -> None:
+        self.events.append("request_stop")
+
+    def stopped(self) -> None:
+        self.events.append("stopped")
+
+    def observe_plan(self, *_arguments) -> None:
+        return
+
+    def treatment_started(self, selection) -> None:
+        self.events.append(("treatment_started", selection.table_id))
+
+    def treatment_finished(
+        self,
+        selection,
+        result,
+        error,
+        duration_seconds: float,
+    ) -> None:
+        self.events.append(
+            (
+                "treatment_finished",
+                selection.table_id,
+                result,
+                error,
+                duration_seconds,
+            )
+        )
+
+
+class RecordingStopEvent:
+    def __init__(self) -> None:
+        self.set_value = False
+        self.waits: list[float] = []
+
+    def is_set(self) -> bool:
+        return self.set_value
+
+    def set(self) -> None:
+        self.set_value = True
+
+    def wait(self, timeout: float) -> bool:
+        self.waits.append(timeout)
+        self.set()
+        return True
+
+
+def no_treatment_outcome() -> MaintenanceOutcome:
+    return MaintenanceOutcome(
+        state=MaintenanceState.NO_TREATMENT,
+        selection=None,
+        result=None,
+        selection_reason=SelectionReason.NO_RUNNABLE_TREATMENTS,
+        claim_contention=0,
+        duration_seconds=None,
+        table_present=None,
+        still_actionable=None,
+    )
+
+
+def stale_outcome() -> MaintenanceOutcome:
+    return MaintenanceOutcome(
+        state=MaintenanceState.STALE,
+        selection=None,
+        result=None,
+        selection_reason=None,
+        claim_contention=0,
+        duration_seconds=None,
+        table_present=None,
+        still_actionable=None,
+    )
+
+
 def test_busy_top_candidate_does_not_idle_the_worker() -> None:
     initial = catalog(
         table(1, files=6, file_bytes=120), table(2, files=4, file_bytes=80)
@@ -220,3 +315,107 @@ def test_failed_treatment_releases_claim() -> None:
         )
 
     assert coordinator.claims[0].released is True
+
+
+def test_treatment_observer_brackets_only_native_execution() -> None:
+    initial = catalog(table(1, files=4, file_bytes=80))
+    observer = RecordingObserver()
+
+    outcome = maintain_once(
+        _METADATA,
+        _STORAGE,
+        _DETECTION,
+        _ENVELOPE,
+        prioritize(diagnose_inventory(initial)),
+        FakeCoordinator(),
+        inventory=InventorySequence(initial, catalog(table(1))),
+        execute=lambda *_arguments: TreatmentResult(4, 1),
+        observer=observer,
+    )
+
+    assert outcome.state is MaintenanceState.COMPLETED
+    assert observer.events[0] == ("treatment_started", 1)
+    finished = observer.events[1]
+    assert isinstance(finished, tuple)
+    assert finished[:4] == (
+        "treatment_finished",
+        1,
+        TreatmentResult(4, 1),
+        None,
+    )
+
+
+def test_run_loop_sleeps_interruptibly_when_there_is_no_work() -> None:
+    stop_event = RecordingStopEvent()
+    observer = RecordingObserver()
+    configuration = RunConfiguration(12.5, 60, "127.0.0.1", 8_000)
+
+    run_loop(
+        no_treatment_outcome,
+        configuration,
+        observer,
+        stop_event,  # type: ignore[arg-type]
+    )
+
+    assert stop_event.waits == [12.5]
+    assert observer.events == [
+        "cycle_started",
+        ("cycle_completed", MaintenanceState.NO_TREATMENT),
+        ("idle", 12.5),
+        "stopped",
+    ]
+
+
+def test_run_loop_retries_failures_after_the_same_interruptible_wait() -> None:
+    stop_event = RecordingStopEvent()
+    observer = RecordingObserver()
+    configuration = RunConfiguration(7, 60, "127.0.0.1", 8_000)
+
+    def fail() -> MaintenanceOutcome:
+        raise MaintenanceError("catalog unavailable")
+
+    run_loop(
+        fail,
+        configuration,
+        observer,
+        stop_event,  # type: ignore[arg-type]
+    )
+
+    assert stop_event.waits == [7]
+    assert observer.events == [
+        "cycle_started",
+        "cycle_failed",
+        ("idle", 7),
+        "stopped",
+    ]
+
+
+def test_run_loop_replans_stale_work_immediately() -> None:
+    stop_event = RecordingStopEvent()
+    observer = RecordingObserver()
+    configuration = RunConfiguration(7, 60, "127.0.0.1", 8_000)
+    cycles = 0
+
+    def cycle() -> MaintenanceOutcome:
+        nonlocal cycles
+        cycles += 1
+        if cycles == 2:
+            stop_event.set()
+        return stale_outcome()
+
+    run_loop(
+        cycle,
+        configuration,
+        observer,
+        stop_event,  # type: ignore[arg-type]
+    )
+
+    assert cycles == 2
+    assert stop_event.waits == []
+    assert observer.events == [
+        "cycle_started",
+        ("cycle_completed", MaintenanceState.STALE),
+        "cycle_started",
+        ("cycle_completed", MaintenanceState.STALE),
+        "stopped",
+    ]

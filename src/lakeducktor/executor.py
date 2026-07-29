@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import suppress
 from typing import Protocol
 
 import duckdb
@@ -31,7 +30,7 @@ class TreatmentConnection(Protocol):
         parameters: tuple[object, ...] | list[object],
     ) -> TreatmentConnection: ...
 
-    def fetchone(self) -> tuple[object, ...] | None: ...
+    def fetchall(self) -> list[tuple[object, ...]]: ...
 
 
 type DuckDBConnectionFactory = Callable[[], duckdb.DuckDBPyConnection]
@@ -54,7 +53,7 @@ def execute_native_treatment(
     if selection.kind is TreatmentKind.MERGE:
         if selection.max_compacted_files is None or selection.max_compacted_files <= 0:
             raise ExecutionError("merge treatment is missing max_compacted_files")
-        row = connection.execute(
+        rows = connection.execute(
             """
             SELECT
                 coalesce(sum(files_processed), 0)::BIGINT,
@@ -72,9 +71,9 @@ def execute_native_treatment(
                 selection.schema_name,
                 selection.max_compacted_files,
             ],
-        ).fetchone()
+        ).fetchall()
     elif selection.kind is TreatmentKind.DELETE_REWRITE:
-        row = connection.execute(
+        rows = connection.execute(
             """
             SELECT
                 coalesce(sum(files_processed), 0)::BIGINT,
@@ -90,11 +89,12 @@ def execute_native_treatment(
                 selection.table_name,
                 selection.schema_name,
             ],
-        ).fetchone()
+        ).fetchall()
     else:
         raise ExecutionError(f"unsupported treatment kind: {selection.kind}")
-    if row is None:
-        raise ExecutionError("DuckLake returned no treatment result")
+    if len(rows) != 1 or len(rows[0]) != 2:
+        raise ExecutionError("DuckLake returned an invalid treatment result")
+    row = rows[0]
     return TreatmentResult(
         files_processed=int(row[0]),
         files_created=int(row[1]),
@@ -112,8 +112,8 @@ def execute_treatment(
     """Attach one DuckLake writable and execute its selected treatment."""
 
     connection = connect()
-    attached = False
     try:
+        connection.execute("PRAGMA disable_checkpoint_on_shutdown")
         connection.execute("SET threads = ?", [envelope.duckdb_threads])
         connection.execute("SET memory_limit = ?", [envelope.duckdb_memory])
         for extension in ("httpfs", "postgres", "ducklake"):
@@ -151,14 +151,10 @@ def execute_treatment(
             )
             """
         )
-        attached = True
         return execute_native_treatment(connection, selection)
     except ExecutionError:
         raise
     except duckdb.Error as error:
         raise ExecutionError("DuckLake treatment failed") from error
     finally:
-        if attached:
-            with suppress(duckdb.Error):
-                connection.execute(f"DETACH {_TREATMENT_ALIAS}")
         connection.close()

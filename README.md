@@ -10,3 +10,5 @@ LakeDucktor maintains physical files. It does not provision lakes, proxy SQL,
 manage access, or accept application writes.
 
 [Vision and scope](docs/VISION.md)
+
+[Running LakeDucktor](docs/RUNNING.md) · [Scaling](docs/SCALING.md)

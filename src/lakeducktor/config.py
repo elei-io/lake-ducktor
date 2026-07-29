@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -58,6 +59,21 @@ def _required(environment: Mapping[str, str], name: str) -> str:
 def _comma_separated(environment: Mapping[str, str], name: str) -> tuple[str, ...]:
     values = (item.strip() for item in environment.get(name, "").split(","))
     return tuple(dict.fromkeys(item for item in values if item))
+
+
+def _positive_float(
+    environment: Mapping[str, str],
+    name: str,
+    default: float,
+) -> float:
+    raw_value = environment.get(name, str(default)).strip()
+    try:
+        value = float(raw_value)
+    except ValueError as error:
+        raise ConfigurationError(f"{name} must be a positive number") from error
+    if not isfinite(value) or value <= 0:
+        raise ConfigurationError(f"{name} must be a positive number")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,4 +181,45 @@ class StorageConfiguration:
             ),
             bucket=_required(values, "CATALOG_STORAGE_BUCKET"),
             use_ssl=parsed.scheme == "https",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RunConfiguration:
+    """Operational settings for one long-lived worker."""
+
+    poll_interval_seconds: float
+    treatment_stuck_after_seconds: float
+    metrics_host: str
+    metrics_port: int
+
+    @classmethod
+    def from_environment(
+        cls,
+        environment: Mapping[str, str] | None = None,
+    ) -> RunConfiguration:
+        values = os.environ if environment is None else environment
+        raw_port = values.get("METRICS_PORT", "8000").strip()
+        try:
+            metrics_port = int(raw_port)
+        except ValueError as error:
+            raise ConfigurationError("METRICS_PORT must be an integer") from error
+        if not 1 <= metrics_port <= 65535:
+            raise ConfigurationError("METRICS_PORT must be between 1 and 65535")
+        metrics_host = values.get("METRICS_HOST", "0.0.0.0").strip()
+        if not metrics_host:
+            raise ConfigurationError("METRICS_HOST must not be empty")
+        return cls(
+            poll_interval_seconds=_positive_float(
+                values,
+                "POLL_INTERVAL_SECONDS",
+                60,
+            ),
+            treatment_stuck_after_seconds=_positive_float(
+                values,
+                "TREATMENT_STUCK_AFTER_SECONDS",
+                3_600,
+            ),
+            metrics_host=metrics_host,
+            metrics_port=metrics_port,
         )
