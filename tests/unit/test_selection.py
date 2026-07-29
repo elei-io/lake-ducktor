@@ -11,7 +11,7 @@ from lakeducktor.model import (
     SelectionReason,
     TreatmentKind,
 )
-from lakeducktor.selection import SelectionError, select_treatment
+from lakeducktor.selection import SelectionError, readmit_treatment, select_treatment
 
 _ENVELOPE = ResourceEnvelope(
     duckdb_threads=4,
@@ -143,3 +143,41 @@ def test_invalid_merge_output_estimate_is_rejected() -> None:
 
     with pytest.raises(SelectionError, match="output estimate"):
         select_treatment(plan(merges=(candidate,)), _ENVELOPE)
+
+
+def test_unavailable_table_is_skipped_without_changing_priority() -> None:
+    decision = select_treatment(
+        plan(
+            merges=(
+                merge(1, 1),
+                merge(2, 2),
+            )
+        ),
+        _ENVELOPE,
+        frozenset({("lake", 1)}),
+    )
+
+    assert decision.selected is not None
+    assert decision.selected.table_id == 2
+    assert decision.selected.priority_rank == 2
+
+
+def test_revalidation_keeps_identity_but_refreshes_name_and_bound() -> None:
+    previous = select_treatment(
+        plan(merges=(merge(1, 1),)),
+        _ENVELOPE,
+    ).selected
+    assert previous is not None
+    current = replace(
+        merge(4, 1, target=80),
+        table_name="renamed",
+        input_files=4,
+        expected_files_eliminated=2,
+    )
+
+    refreshed = readmit_treatment(plan(merges=(current,)), _ENVELOPE, previous)
+
+    assert refreshed is not None
+    assert refreshed.table_name == "renamed"
+    assert refreshed.priority_rank == 4
+    assert refreshed.max_compacted_files == 2

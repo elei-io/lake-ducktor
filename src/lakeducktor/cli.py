@@ -9,10 +9,18 @@ from pathlib import Path
 
 from lakeducktor import __version__
 from lakeducktor.capabilities import CapabilitiesError, adapter_for
-from lakeducktor.config import ConfigurationError, MetadataConfiguration, load_env_file
+from lakeducktor.config import (
+    ConfigurationError,
+    MetadataConfiguration,
+    StorageConfiguration,
+    load_env_file,
+)
+from lakeducktor.coordination import PostgresTreatmentCoordinator
+from lakeducktor.daemon import MaintenanceError, maintain_once
 from lakeducktor.diagnosis import DiagnosisError, diagnose_inventory
 from lakeducktor.inventory import InventoryError, inventory_catalog
 from lakeducktor.lake import BackendDetectionError, detect_metadata_backend
+from lakeducktor.model import MaintenanceState, MetadataBackend
 from lakeducktor.priority import PriorityError, prioritize
 from lakeducktor.resources import resource_envelope_from_environment
 from lakeducktor.selection import SelectionError, select_treatment
@@ -58,6 +66,10 @@ def parser() -> argparse.ArgumentParser:
         "select",
         help="select one treatment that fits this worker without executing it",
     )
+    actions.add_parser(
+        "maintain",
+        help="claim, revalidate, and execute at most one treatment",
+    )
     return command
 
 
@@ -70,7 +82,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         configuration = MetadataConfiguration.from_environment()
         envelope = (
             resource_envelope_from_environment()
-            if arguments.command == "select"
+            if arguments.command in {"select", "maintain"}
+            else None
+        )
+        storage = (
+            StorageConfiguration.from_environment()
+            if arguments.command == "maintain"
             else None
         )
         detection = detect_metadata_backend(configuration)
@@ -85,7 +102,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         "selected adapter=%s",
         type(adapter).__name__,
     )
-    if arguments.command in {"inventory", "diagnose", "prioritize", "select"}:
+    if arguments.command in {
+        "inventory",
+        "diagnose",
+        "prioritize",
+        "select",
+        "maintain",
+    }:
         try:
             inventory = inventory_catalog(configuration, detection)
         except InventoryError as error:
@@ -109,7 +132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lake.dangling_delete_files,
                 lake.scheduled_files,
             )
-        if arguments.command in {"diagnose", "prioritize", "select"}:
+        if arguments.command in {"diagnose", "prioritize", "select", "maintain"}:
             try:
                 diagnosis = diagnose_inventory(inventory)
             except DiagnosisError as error:
@@ -151,7 +174,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         table.rewrite_deleted_rows,
                         table.dangling_delete_files,
                     )
-            if arguments.command in {"prioritize", "select"}:
+            if arguments.command in {"prioritize", "select", "maintain"}:
                 try:
                     plan = prioritize(diagnosis)
                 except PriorityError as error:
@@ -218,37 +241,97 @@ def main(argv: Sequence[str] | None = None) -> int:
                         envelope.duckdb_memory,
                         envelope.duckdb_memory_bytes,
                     )
-                    try:
-                        decision = select_treatment(plan, envelope)
-                    except SelectionError as error:
-                        _LOGGER.error("selection_failed error=%s", error)
-                        return 1
-                    selected = decision.selected
-                    if selected is None:
-                        _LOGGER.info(
-                            "selection=none reason=%s memory_deferred=%s",
-                            decision.reason.value,
-                            decision.memory_deferred,
-                        )
+                    if arguments.command == "select":
+                        try:
+                            decision = select_treatment(plan, envelope)
+                        except SelectionError as error:
+                            _LOGGER.error("selection_failed error=%s", error)
+                            return 1
+                        selected = decision.selected
+                        if selected is None:
+                            _LOGGER.info(
+                                "selection=none reason=%s memory_deferred=%s",
+                                decision.reason.value,
+                                decision.memory_deferred,
+                            )
+                        else:
+                            _LOGGER.info(
+                                "selected treatment=%s priority_rank=%s lake=%s "
+                                "table_id=%s schema=%r table=%r input_bytes=%s "
+                                "admitted_bytes=%s max_compacted_files=%s "
+                                "memory_deferred=%s",
+                                selected.kind.value,
+                                selected.priority_rank,
+                                selected.metadata_schema,
+                                selected.table_id,
+                                selected.schema_name,
+                                selected.table_name,
+                                selected.input_bytes,
+                                selected.admitted_bytes,
+                                selected.max_compacted_files
+                                if selected.max_compacted_files is not None
+                                else "none",
+                                decision.memory_deferred,
+                            )
                     else:
-                        _LOGGER.info(
-                            "selected treatment=%s priority_rank=%s lake=%s "
-                            "table_id=%s schema=%r table=%r input_bytes=%s "
-                            "admitted_bytes=%s max_compacted_files=%s "
-                            "memory_deferred=%s",
-                            selected.kind.value,
-                            selected.priority_rank,
-                            selected.metadata_schema,
-                            selected.table_id,
-                            selected.schema_name,
-                            selected.table_name,
-                            selected.input_bytes,
-                            selected.admitted_bytes,
-                            selected.max_compacted_files
-                            if selected.max_compacted_files is not None
-                            else "none",
-                            decision.memory_deferred,
-                        )
+                        assert storage is not None
+                        if detection.backend is not MetadataBackend.POSTGRES:
+                            _LOGGER.error(
+                                "maintenance_failed error=unsupported "
+                                "coordination backend: %s",
+                                detection.backend.value,
+                            )
+                            return 1
+                        try:
+                            outcome = maintain_once(
+                                configuration,
+                                storage,
+                                detection,
+                                envelope,
+                                plan,
+                                PostgresTreatmentCoordinator(configuration),
+                            )
+                        except MaintenanceError as error:
+                            _LOGGER.error("maintenance_failed error=%s", error)
+                            return 1
+                        if outcome.state is MaintenanceState.NO_TREATMENT:
+                            assert outcome.selection_reason is not None
+                            _LOGGER.info(
+                                "maintenance state=no_treatment reason=%s "
+                                "claim_contention=%s",
+                                outcome.selection_reason.value,
+                                outcome.claim_contention,
+                            )
+                        elif outcome.state is MaintenanceState.STALE:
+                            assert outcome.selection is not None
+                            _LOGGER.info(
+                                "maintenance state=stale reason=revalidation "
+                                "kind=%s lake=%s table_id=%s "
+                                "claim_contention=%s",
+                                outcome.selection.kind.value,
+                                outcome.selection.metadata_schema,
+                                outcome.selection.table_id,
+                                outcome.claim_contention,
+                            )
+                        else:
+                            assert outcome.selection is not None
+                            assert outcome.result is not None
+                            assert outcome.duration_seconds is not None
+                            _LOGGER.info(
+                                "treatment_completed kind=%s lake=%s table_id=%s "
+                                "files_processed=%s files_created=%s "
+                                "duration_seconds=%.3f table_present=%s "
+                                "still_actionable=%s claim_contention=%s",
+                                outcome.selection.kind.value,
+                                outcome.selection.metadata_schema,
+                                outcome.selection.table_id,
+                                outcome.result.files_processed,
+                                outcome.result.files_created,
+                                outcome.duration_seconds,
+                                str(outcome.table_present).lower(),
+                                str(outcome.still_actionable).lower(),
+                                outcome.claim_contention,
+                            )
     return 0
 
 

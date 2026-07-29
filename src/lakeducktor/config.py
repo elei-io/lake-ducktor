@@ -7,7 +7,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -119,3 +119,50 @@ class MetadataConfiguration:
         host = quote(self.host, safe="[]:.")
         database = quote(self.database, safe="")
         return f"postgresql://{username}:{password}@{host}:{self.port}/{database}"
+
+
+@dataclass(frozen=True, slots=True)
+class StorageConfiguration:
+    """Credentials required by a writable DuckLake attachment."""
+
+    provider: str
+    endpoint: str
+    region: str
+    access_key_id: str
+    secret_access_key: str
+    bucket: str
+    use_ssl: bool
+
+    @classmethod
+    def from_environment(
+        cls,
+        environment: Mapping[str, str] | None = None,
+    ) -> StorageConfiguration:
+        values = os.environ if environment is None else environment
+        provider = _required(values, "CATALOG_STORAGE").lower()
+        if provider != "s3-compatible":
+            raise ConfigurationError(
+                "the current executor supports CATALOG_STORAGE=s3-compatible"
+            )
+        raw_endpoint = _required(values, "CATALOG_STORAGE_ENDPOINT")
+        parsed = urlsplit(raw_endpoint)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ConfigurationError(
+                "CATALOG_STORAGE_ENDPOINT must be an http or https URL"
+            )
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ConfigurationError(
+                "CATALOG_STORAGE_ENDPOINT must not contain a path, query, or fragment"
+            )
+        return cls(
+            provider=provider,
+            endpoint=parsed.netloc,
+            region=_required(values, "CATALOG_STORAGE_REGION"),
+            access_key_id=_required(values, "CATALOG_STORAGE_ACCESS_KEY_ID"),
+            secret_access_key=_required(
+                values,
+                "CATALOG_STORAGE_SECRET_ACCESS_KEY",
+            ),
+            bucket=_required(values, "CATALOG_STORAGE_BUCKET"),
+            use_ssl=parsed.scheme == "https",
+        )

@@ -205,6 +205,48 @@ independent treatment.
 state. Thread count is part of the eventual execution envelope; it does not
 alter treatment priority.
 
+### Treat one selection
+
+`lakeducktor maintain` performs at most one native treatment. PostgreSQL-backed
+lakes use a non-blocking session advisory lock scoped to the metadata schema
+and stable table ID. A busy table is skipped so another fitting table can use
+the worker. The dedicated PostgreSQL session holds ownership for the duration
+of treatment; explicit release happens in all normal and failure paths, while
+connection loss releases the lock after worker death.
+
+After claiming, LakeDucktor inventories and diagnoses that lake again. It
+abandons work that was removed, healed, excluded, or no longer fits, and
+refreshes renamed tables by stable ID. It then opens a fresh writable DuckDB
+context with the configured memory and threads:
+
+- merges call DuckLake's table-scoped `merge_adjacent_files` with the selected
+  `max_compacted_files` bound;
+- delete rewrites call DuckLake's table-scoped `rewrite_data_files` without
+  overriding the lake's effective threshold.
+
+DuckLake chooses the current eligible files and owns the metadata and object
+storage changes. LakeDucktor records the returned processed/created file
+counts, diagnoses the table once more, and releases the claim. A successful
+bounded treatment may remain actionable for the next invocation.
+
+Merge treatment is incremental but not tiered: it uses the lake's effective
+`target_file_size` directly and never changes that setting to create
+LakeDucktor-owned size classes. Tiering requires explicit lake policy or a
+native per-call output target.
+
+Long treatments emit start and completion or failure events. Running state,
+start time, elapsed time, and outcomes are meaningful operational signals;
+DuckLake does not expose a reliable percentage complete, so LakeDucktor does
+not manufacture one. PostgreSQL session ownership needs no application
+heartbeat.
+
+PostgreSQL coordination uses the optional dependency:
+
+```sh
+uv sync --extra postgres
+uv run lakeducktor maintain
+```
+
 ## Performance and resource safety
 
 ### Understand what a native bound really bounds

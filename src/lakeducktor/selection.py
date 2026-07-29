@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from lakeducktor.model import (
+    DeleteRewritePriority,
     MergePriority,
     PriorityPlan,
     PriorityState,
@@ -16,6 +17,30 @@ from lakeducktor.model import (
 
 class SelectionError(RuntimeError):
     """A priority candidate cannot be admitted safely."""
+
+
+def _rewrite_selection(
+    candidate: DeleteRewritePriority,
+    envelope: ResourceEnvelope,
+) -> TreatmentSelection | None:
+    if candidate.table_footprint_bytes <= 0:
+        raise SelectionError(
+            "delete rewrite has an invalid table footprint for "
+            f"table_id={candidate.table_id}"
+        )
+    if candidate.table_footprint_bytes > envelope.duckdb_memory_bytes:
+        return None
+    return TreatmentSelection(
+        kind=TreatmentKind.DELETE_REWRITE,
+        priority_rank=candidate.rank,
+        metadata_schema=candidate.metadata_schema,
+        table_id=candidate.table_id,
+        schema_name=candidate.schema_name,
+        table_name=candidate.table_name,
+        input_bytes=candidate.input_bytes,
+        admitted_bytes=candidate.table_footprint_bytes,
+        max_compacted_files=None,
+    )
 
 
 def _merge_selection(
@@ -51,6 +76,7 @@ def _merge_selection(
 def select_treatment(
     plan: PriorityPlan,
     envelope: ResourceEnvelope,
+    unavailable_tables: frozenset[tuple[str, int]] = frozenset(),
 ) -> SelectionDecision:
     """Choose one treatment using fixed lane order and memory admission."""
 
@@ -60,33 +86,26 @@ def select_treatment(
     fitting_rewrites: list[TreatmentSelection] = []
     fitting_merges: list[TreatmentSelection] = []
     memory_deferred = 0
+    available_runnable = 0
 
     for candidate in plan.delete_rewrites:
-        if candidate.table_footprint_bytes <= 0:
-            raise SelectionError(
-                "delete rewrite has an invalid table footprint for "
-                f"table_id={candidate.table_id}"
-            )
-        if candidate.table_footprint_bytes > envelope.duckdb_memory_bytes:
-            memory_deferred += 1
+        key = (candidate.metadata_schema, candidate.table_id)
+        if key in unavailable_tables:
             continue
-        fitting_rewrites.append(
-            TreatmentSelection(
-                kind=TreatmentKind.DELETE_REWRITE,
-                priority_rank=candidate.rank,
-                metadata_schema=candidate.metadata_schema,
-                table_id=candidate.table_id,
-                schema_name=candidate.schema_name,
-                table_name=candidate.table_name,
-                input_bytes=candidate.input_bytes,
-                admitted_bytes=candidate.table_footprint_bytes,
-                max_compacted_files=None,
-            )
-        )
+        available_runnable += 1
+        selection = _rewrite_selection(candidate, envelope)
+        if selection is None:
+            memory_deferred += 1
+        else:
+            fitting_rewrites.append(selection)
 
     for candidate in plan.merges:
         if candidate.state is PriorityState.BLOCKED:
             continue
+        key = (candidate.metadata_schema, candidate.table_id)
+        if key in unavailable_tables:
+            continue
+        available_runnable += 1
         selection = _merge_selection(candidate, envelope)
         if selection is None:
             memory_deferred += 1
@@ -96,7 +115,7 @@ def select_treatment(
     selected = next(iter(fitting_rewrites or fitting_merges), None)
     if selected is not None:
         reason = SelectionReason.SELECTED
-    elif plan.runnable:
+    elif available_runnable:
         reason = SelectionReason.NO_TREATMENT_FITS_MEMORY
     else:
         reason = SelectionReason.NO_RUNNABLE_TREATMENTS
@@ -106,3 +125,25 @@ def select_treatment(
         selected=selected,
         memory_deferred=memory_deferred,
     )
+
+
+def readmit_treatment(
+    plan: PriorityPlan,
+    envelope: ResourceEnvelope,
+    previous: TreatmentSelection,
+) -> TreatmentSelection | None:
+    """Re-admit the same treatment from freshly diagnosed state."""
+
+    key = (previous.metadata_schema, previous.table_id)
+    if previous.kind is TreatmentKind.DELETE_REWRITE:
+        for candidate in plan.delete_rewrites:
+            if (candidate.metadata_schema, candidate.table_id) == key:
+                return _rewrite_selection(candidate, envelope)
+        return None
+    for candidate in plan.merges:
+        if (
+            candidate.metadata_schema,
+            candidate.table_id,
+        ) == key and candidate.state is PriorityState.RUNNABLE:
+            return _merge_selection(candidate, envelope)
+    return None

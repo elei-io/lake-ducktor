@@ -42,6 +42,12 @@ class SelectionReason(StrEnum):
     NO_TREATMENT_FITS_MEMORY = "no_treatment_fits_memory"
 
 
+class MaintenanceState(StrEnum):
+    COMPLETED = "completed"
+    NO_TREATMENT = "no_treatment"
+    STALE = "stale"
+
+
 @dataclass(frozen=True, slots=True)
 class DuckDBExtension:
     name: str
@@ -299,3 +305,21 @@ class SelectionDecision:
     envelope: ResourceEnvelope
     selected: TreatmentSelection | None
     memory_deferred: int
+
+
+@dataclass(frozen=True, slots=True)
+class TreatmentResult:
+    files_processed: int
+    files_created: int
+
+
+@dataclass(frozen=True, slots=True)
+class MaintenanceOutcome:
+    state: MaintenanceState
+    selection: TreatmentSelection | None
+    result: TreatmentResult | None
+    selection_reason: SelectionReason | None
+    claim_contention: int
+    duration_seconds: float | None
+    table_present: bool | None
+    still_actionable: bool | None

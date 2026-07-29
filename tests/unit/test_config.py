@@ -5,6 +5,7 @@ import pytest
 from lakeducktor.config import (
     ConfigurationError,
     MetadataConfiguration,
+    StorageConfiguration,
     load_env_file,
 )
 
@@ -60,3 +61,34 @@ def test_env_file_does_not_override_process_values(tmp_path: Path) -> None:
     load_env_file(path, environment)
 
     assert environment == {"EXISTING": "process", "NEW_VALUE": "loaded"}
+
+
+def test_s3_compatible_storage_configuration_parses_endpoint() -> None:
+    configuration = StorageConfiguration.from_environment(
+        {
+            "CATALOG_STORAGE": "s3-compatible",
+            "CATALOG_STORAGE_ENDPOINT": "https://objects.example:9443",
+            "CATALOG_STORAGE_REGION": "ap-northeast-1",
+            "CATALOG_STORAGE_ACCESS_KEY_ID": "key",
+            "CATALOG_STORAGE_SECRET_ACCESS_KEY": "secret",
+            "CATALOG_STORAGE_BUCKET": "lake",
+        }
+    )
+
+    assert configuration.endpoint == "objects.example:9443"
+    assert configuration.use_ssl is True
+    assert configuration.bucket == "lake"
+
+
+def test_storage_endpoint_path_is_rejected() -> None:
+    with pytest.raises(ConfigurationError, match="must not contain"):
+        StorageConfiguration.from_environment(
+            {
+                "CATALOG_STORAGE": "s3-compatible",
+                "CATALOG_STORAGE_ENDPOINT": "http://objects.example/path",
+                "CATALOG_STORAGE_REGION": "us-east-1",
+                "CATALOG_STORAGE_ACCESS_KEY_ID": "key",
+                "CATALOG_STORAGE_SECRET_ACCESS_KEY": "secret",
+                "CATALOG_STORAGE_BUCKET": "lake",
+            }
+        )
