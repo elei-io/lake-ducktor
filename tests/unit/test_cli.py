@@ -230,3 +230,103 @@ def test_diagnose_command_logs_lake_and_table_explanations(
         )
         for message in messages
     )
+
+
+def test_prioritize_command_logs_separate_treatment_lanes(
+    monkeypatch,
+    caplog,
+    tmp_path,
+) -> None:
+    caplog.set_level(logging.INFO, logger="lakeducktor")
+    monkeypatch.setattr(
+        "lakeducktor.cli.MetadataConfiguration.from_environment",
+        lambda: object(),
+    )
+    detection = BackendDetection(
+        backend=MetadataBackend.POSTGRES,
+        metadata_schemas=("lake_a",),
+        extension_version="v1",
+        duckdb_extensions=_EXTENSIONS,
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.detect_metadata_backend",
+        lambda _configuration: detection,
+    )
+    inventory_lake = SimpleNamespace(
+        metadata_schema="lake_a",
+        latest_snapshot_id=11,
+        table_count=1,
+        active_data_files=4,
+        active_data_bytes=160,
+        active_delete_files=2,
+        active_delete_bytes=10,
+        dangling_delete_files=0,
+        scheduled_files=0,
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.inventory_catalog",
+        lambda _configuration, _detection: SimpleNamespace(lakes=(inventory_lake,)),
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.diagnose_inventory",
+        lambda _inventory: SimpleNamespace(lakes=()),
+    )
+    rewrite = SimpleNamespace(
+        rank=1,
+        metadata_schema="lake_a",
+        table_id=7,
+        schema_name="main",
+        table_name="events",
+        data_files=1,
+        delete_files=2,
+        deleted_rows=96,
+        original_rows=100,
+        deleted_fraction=0.96,
+        input_bytes=200,
+    )
+    merge = SimpleNamespace(
+        rank=1,
+        metadata_schema="lake_a",
+        table_id=7,
+        schema_name="main",
+        table_name="events",
+        state=SimpleNamespace(value="blocked"),
+        blocked_by=SimpleNamespace(value="delete_rewrite"),
+        groups=1,
+        input_files=4,
+        input_bytes=160,
+        average_input_file_bytes=40,
+        expected_files_eliminated=2,
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.prioritize",
+        lambda _diagnosis: SimpleNamespace(
+            delete_rewrites=(rewrite,),
+            merges=(merge,),
+            runnable=1,
+            blocked=1,
+            excluded_tables=0,
+            attention_tables=0,
+        ),
+    )
+
+    result = main(["--env-file", str(tmp_path / "missing"), "prioritize"])
+
+    assert result == 0
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        message.startswith("priority kind=delete_rewrite rank=1 lake=lake_a table_id=7")
+        for message in messages
+    )
+    assert any(
+        message.startswith(
+            "priority kind=merge rank=1 lake=lake_a table_id=7 "
+            "schema='main' table='events' state=blocked "
+            "blocked_by=delete_rewrite"
+        )
+        for message in messages
+    )
+    assert (
+        "priority_summary delete_rewrites=1 merges=1 runnable=1 blocked=1 "
+        "excluded=0 attention=0"
+    ) in messages

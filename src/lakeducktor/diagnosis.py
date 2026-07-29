@@ -74,6 +74,7 @@ def diagnose_table(table: TableInventory) -> TableDiagnosis:
         table_name=table.table_name,
         state=state,
         reasons=tuple(reasons),
+        target_file_size_bytes=table.target_file_size_bytes,
         merge_groups=merge_groups,
         merge_input_files=merge_input_files,
         merge_input_bytes=merge_input_bytes,
@@ -82,6 +83,7 @@ def diagnose_table(table: TableInventory) -> TableDiagnosis:
         rewrite_input_bytes=table.rewrite_input_bytes,
         rewrite_delete_files=table.rewrite_delete_files,
         rewrite_deleted_rows=table.rewrite_deleted_rows,
+        rewrite_original_rows=table.rewrite_original_rows,
         dangling_delete_files=table.dangling_delete_files,
     )
 

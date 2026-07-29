@@ -13,6 +13,7 @@ from lakeducktor.config import ConfigurationError, MetadataConfiguration, load_e
 from lakeducktor.diagnosis import DiagnosisError, diagnose_inventory
 from lakeducktor.inventory import InventoryError, inventory_catalog
 from lakeducktor.lake import BackendDetectionError, detect_metadata_backend
+from lakeducktor.priority import PriorityError, prioritize
 
 _LOGGER = logging.getLogger("lakeducktor")
 
@@ -47,6 +48,10 @@ def parser() -> argparse.ArgumentParser:
         "diagnose",
         help="explain current physical maintenance needs without mutating lakes",
     )
+    actions.add_parser(
+        "prioritize",
+        help="rank current maintenance candidates without executing them",
+    )
     return command
 
 
@@ -69,7 +74,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "selected adapter=%s",
         type(adapter).__name__,
     )
-    if arguments.command in {"inventory", "diagnose"}:
+    if arguments.command in {"inventory", "diagnose", "prioritize"}:
         try:
             inventory = inventory_catalog(configuration, detection)
         except InventoryError as error:
@@ -93,7 +98,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lake.dangling_delete_files,
                 lake.scheduled_files,
             )
-        if arguments.command == "diagnose":
+        if arguments.command in {"diagnose", "prioritize"}:
             try:
                 diagnosis = diagnose_inventory(inventory)
             except DiagnosisError as error:
@@ -135,6 +140,63 @@ def main(argv: Sequence[str] | None = None) -> int:
                         table.rewrite_deleted_rows,
                         table.dangling_delete_files,
                     )
+            if arguments.command == "prioritize":
+                try:
+                    plan = prioritize(diagnosis)
+                except PriorityError as error:
+                    _LOGGER.error("priority_failed error=%s", error)
+                    return 1
+                for candidate in plan.delete_rewrites:
+                    _LOGGER.info(
+                        "priority kind=delete_rewrite rank=%s lake=%s "
+                        "table_id=%s schema=%r table=%r state=runnable "
+                        "data_files=%s delete_files=%s deleted_rows=%s "
+                        "original_rows=%s deleted_fraction=%.6f "
+                        "input_bytes=%s",
+                        candidate.rank,
+                        candidate.metadata_schema,
+                        candidate.table_id,
+                        candidate.schema_name,
+                        candidate.table_name,
+                        candidate.data_files,
+                        candidate.delete_files,
+                        candidate.deleted_rows,
+                        candidate.original_rows,
+                        candidate.deleted_fraction,
+                        candidate.input_bytes,
+                    )
+                for candidate in plan.merges:
+                    _LOGGER.info(
+                        "priority kind=merge rank=%s lake=%s table_id=%s "
+                        "schema=%r table=%r state=%s blocked_by=%s "
+                        "groups=%s input_files=%s input_bytes=%s "
+                        "average_input_file_bytes=%s "
+                        "expected_files_eliminated=%s",
+                        candidate.rank,
+                        candidate.metadata_schema,
+                        candidate.table_id,
+                        candidate.schema_name,
+                        candidate.table_name,
+                        candidate.state.value,
+                        candidate.blocked_by.value
+                        if candidate.blocked_by is not None
+                        else "none",
+                        candidate.groups,
+                        candidate.input_files,
+                        candidate.input_bytes,
+                        candidate.average_input_file_bytes,
+                        candidate.expected_files_eliminated,
+                    )
+                _LOGGER.info(
+                    "priority_summary delete_rewrites=%s merges=%s "
+                    "runnable=%s blocked=%s excluded=%s attention=%s",
+                    len(plan.delete_rewrites),
+                    len(plan.merges),
+                    plan.runnable,
+                    plan.blocked,
+                    plan.excluded_tables,
+                    plan.attention_tables,
+                )
     return 0
 
 

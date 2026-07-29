@@ -26,6 +26,16 @@ class DiagnosisState(StrEnum):
     ATTENTION = "attention"
 
 
+class TreatmentKind(StrEnum):
+    DELETE_REWRITE = "delete_rewrite"
+    MERGE = "merge"
+
+
+class PriorityState(StrEnum):
+    RUNNABLE = "runnable"
+    BLOCKED = "blocked"
+
+
 @dataclass(frozen=True, slots=True)
 class DuckDBExtension:
     name: str
@@ -165,6 +175,7 @@ class TableDiagnosis:
     table_name: str
     state: DiagnosisState
     reasons: tuple[str, ...]
+    target_file_size_bytes: int
     merge_groups: int
     merge_input_files: int
     merge_input_bytes: int
@@ -173,6 +184,7 @@ class TableDiagnosis:
     rewrite_input_bytes: int
     rewrite_delete_files: int
     rewrite_deleted_rows: int
+    rewrite_original_rows: int
     dangling_delete_files: int
 
 
@@ -199,3 +211,54 @@ class LakeDiagnosis:
 @dataclass(frozen=True, slots=True)
 class CatalogDiagnosis:
     lakes: tuple[LakeDiagnosis, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DeleteRewritePriority:
+    rank: int
+    metadata_schema: str
+    table_id: int
+    schema_name: str
+    table_name: str
+    data_files: int
+    delete_files: int
+    deleted_rows: int
+    original_rows: int
+    deleted_fraction: float
+    input_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class MergePriority:
+    rank: int
+    metadata_schema: str
+    table_id: int
+    schema_name: str
+    table_name: str
+    state: PriorityState
+    blocked_by: TreatmentKind | None
+    groups: int
+    input_files: int
+    input_bytes: int
+    average_input_file_bytes: int
+    expected_files_eliminated: int
+
+
+@dataclass(frozen=True, slots=True)
+class PriorityPlan:
+    delete_rewrites: tuple[DeleteRewritePriority, ...]
+    merges: tuple[MergePriority, ...]
+    excluded_tables: int
+    attention_tables: int
+
+    @property
+    def runnable(self) -> int:
+        return len(self.delete_rewrites) + sum(
+            candidate.state is PriorityState.RUNNABLE for candidate in self.merges
+        )
+
+    @property
+    def blocked(self) -> int:
+        return sum(
+            candidate.state is PriorityState.BLOCKED for candidate in self.merges
+        )
