@@ -47,6 +47,14 @@ state.
   `target_file_size` are useful experiments, not policy to inherit. Persisting
   an execution strategy as lake policy crosses LakeDucktor's boundary.
 
+### Never checkpoint a lake
+
+LakeDucktor must not issue `CHECKPOINT` or trigger it implicitly by detaching
+or shutting down an attached DuckLake. DuckLake maps a checkpoint to its full
+maintenance suite, which would bypass LakeDucktor's selected table, resource
+admission, and coordination claim. DuckDB connections therefore disable
+checkpoint-on-shutdown before attaching a lake and close without `DETACH`.
+
 ### Diagnose compatible file groups
 
 Files cannot be treated as one table-wide merge pool. Expected compaction
