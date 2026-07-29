@@ -10,6 +10,7 @@ from pathlib import Path
 from lakeducktor import __version__
 from lakeducktor.capabilities import CapabilitiesError, adapter_for
 from lakeducktor.config import ConfigurationError, MetadataConfiguration, load_env_file
+from lakeducktor.diagnosis import DiagnosisError, diagnose_inventory
 from lakeducktor.inventory import InventoryError, inventory_catalog
 from lakeducktor.lake import BackendDetectionError, detect_metadata_backend
 
@@ -42,6 +43,10 @@ def parser() -> argparse.ArgumentParser:
         "inventory",
         help="collect a read-only inventory of current physical lake state",
     )
+    actions.add_parser(
+        "diagnose",
+        help="explain current physical maintenance needs without mutating lakes",
+    )
     return command
 
 
@@ -64,7 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "selected adapter=%s",
         type(adapter).__name__,
     )
-    if arguments.command == "inventory":
+    if arguments.command in {"inventory", "diagnose"}:
         try:
             inventory = inventory_catalog(configuration, detection)
         except InventoryError as error:
@@ -88,6 +93,48 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lake.dangling_delete_files,
                 lake.scheduled_files,
             )
+        if arguments.command == "diagnose":
+            try:
+                diagnosis = diagnose_inventory(inventory)
+            except DiagnosisError as error:
+                _LOGGER.error("diagnosis_failed error=%s", error)
+                return 1
+            for lake in diagnosis.lakes:
+                _LOGGER.info(
+                    "diagnosis lake=%s state=%s actionable_tables=%s "
+                    "excluded_tables=%s attention_tables=%s "
+                    "scheduled_files=%s",
+                    lake.metadata_schema,
+                    lake.state.value,
+                    lake.actionable_tables,
+                    lake.excluded_tables,
+                    lake.attention_tables,
+                    lake.scheduled_files,
+                )
+                for table in lake.tables:
+                    _LOGGER.info(
+                        "diagnosis lake=%s table_id=%s schema=%r table=%r "
+                        "state=%s reasons=%s merge_groups=%s "
+                        "merge_input_files=%s merge_input_bytes=%s "
+                        "expected_files_eliminated=%s rewrite_data_files=%s "
+                        "rewrite_input_bytes=%s rewrite_delete_files=%s "
+                        "rewrite_deleted_rows=%s dangling_delete_files=%s",
+                        table.metadata_schema,
+                        table.table_id,
+                        table.schema_name,
+                        table.table_name,
+                        table.state.value,
+                        ",".join(table.reasons),
+                        table.merge_groups,
+                        table.merge_input_files,
+                        table.merge_input_bytes,
+                        table.expected_files_eliminated,
+                        table.rewrite_data_files,
+                        table.rewrite_input_bytes,
+                        table.rewrite_delete_files,
+                        table.rewrite_deleted_rows,
+                        table.dangling_delete_files,
+                    )
     return 0
 
 

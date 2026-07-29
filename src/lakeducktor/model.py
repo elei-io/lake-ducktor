@@ -19,6 +19,13 @@ class CoordinationStrategy(StrEnum):
     SQLITE = "sqlite"
 
 
+class DiagnosisState(StrEnum):
+    HEALTHY = "healthy"
+    ACTIONABLE = "actionable"
+    EXCLUDED = "excluded"
+    ATTENTION = "attention"
+
+
 @dataclass(frozen=True, slots=True)
 class DuckDBExtension:
     name: str
@@ -52,19 +59,39 @@ class FileSizeDistribution:
 
 
 @dataclass(frozen=True, slots=True)
+class CompatibleFileGroup:
+    schema_version: int | None
+    partition_id: int | None
+    active_files: int
+    active_bytes: int
+    merge_candidate_files: int
+    merge_candidate_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
 class TableInventory:
     metadata_schema: str
     table_id: int
     schema_name: str
     table_name: str
+    auto_compact: bool
+    target_file_size_bytes: int
+    rewrite_delete_threshold: float
     active_data_files: int
     active_data_bytes: int
     active_data_rows: int
     data_file_sizes: FileSizeDistribution
+    compatible_file_groups: tuple[CompatibleFileGroup, ...]
     active_delete_files: int
     active_delete_bytes: int
     deleted_rows: int
     dangling_delete_files: int
+    rewrite_data_files: int
+    rewrite_input_bytes: int
+    rewrite_delete_files: int
+    rewrite_delete_bytes: int
+    rewrite_deleted_rows: int
+    rewrite_original_rows: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,3 +155,47 @@ class CatalogInventory:
     @property
     def scheduled_files(self) -> int:
         return sum(lake.scheduled_files for lake in self.lakes)
+
+
+@dataclass(frozen=True, slots=True)
+class TableDiagnosis:
+    metadata_schema: str
+    table_id: int
+    schema_name: str
+    table_name: str
+    state: DiagnosisState
+    reasons: tuple[str, ...]
+    merge_groups: int
+    merge_input_files: int
+    merge_input_bytes: int
+    expected_files_eliminated: int
+    rewrite_data_files: int
+    rewrite_input_bytes: int
+    rewrite_delete_files: int
+    rewrite_deleted_rows: int
+    dangling_delete_files: int
+
+
+@dataclass(frozen=True, slots=True)
+class LakeDiagnosis:
+    metadata_schema: str
+    state: DiagnosisState
+    scheduled_files: int
+    tables: tuple[TableDiagnosis, ...]
+
+    @property
+    def actionable_tables(self) -> int:
+        return sum(table.state is DiagnosisState.ACTIONABLE for table in self.tables)
+
+    @property
+    def excluded_tables(self) -> int:
+        return sum(table.state is DiagnosisState.EXCLUDED for table in self.tables)
+
+    @property
+    def attention_tables(self) -> int:
+        return sum(table.state is DiagnosisState.ATTENTION for table in self.tables)
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogDiagnosis:
+    lakes: tuple[LakeDiagnosis, ...]

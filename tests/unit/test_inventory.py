@@ -1,6 +1,7 @@
 from collections.abc import Iterable
 
 from lakeducktor.inventory import (
+    CompatibleFileGroupRow,
     LakeSummaryRow,
     TableInventoryRow,
     collect_inventory,
@@ -19,6 +20,9 @@ class FakeInventorySource:
                     7,
                     "main",
                     "events",
+                    True,
+                    256,
+                    0.5,
                     3,
                     600,
                     60,
@@ -30,8 +34,18 @@ class FakeInventorySource:
                     20,
                     4,
                     1,
+                    1,
+                    300,
+                    2,
+                    20,
+                    4,
+                    6,
                 ),
             ),
+            "lake_b": (),
+        }
+        self.group_rows: dict[str, tuple[CompatibleFileGroupRow, ...]] = {
+            "lake_a": ((7, 1, None, 3, 600, 3, 600),),
             "lake_b": (),
         }
 
@@ -40,6 +54,12 @@ class FakeInventorySource:
 
     def tables(self, metadata_schema: str) -> Iterable[TableInventoryRow]:
         return self.table_rows[metadata_schema]
+
+    def compatible_file_groups(
+        self,
+        metadata_schema: str,
+    ) -> Iterable[CompatibleFileGroupRow]:
+        return self.group_rows[metadata_schema]
 
 
 def test_inventory_builds_immutable_physical_facts_without_a_connection() -> None:
@@ -59,6 +79,9 @@ def test_inventory_builds_immutable_physical_facts_without_a_connection() -> Non
     table = lake.tables[0]
     assert (table.metadata_schema, table.table_id) == ("lake_a", 7)
     assert (table.schema_name, table.table_name) == ("main", "events")
+    assert table.auto_compact is True
+    assert table.target_file_size_bytes == 256
+    assert table.rewrite_delete_threshold == 0.5
     assert table.active_data_files == 3
     assert table.active_data_bytes == 600
     assert table.active_data_rows == 60
@@ -70,6 +93,18 @@ def test_inventory_builds_immutable_physical_facts_without_a_connection() -> Non
     assert table.active_delete_bytes == 20
     assert table.deleted_rows == 4
     assert table.dangling_delete_files == 1
+    assert table.rewrite_data_files == 1
+    assert table.rewrite_input_bytes == 300
+    assert table.rewrite_delete_files == 2
+    assert table.rewrite_delete_bytes == 20
+    assert table.rewrite_deleted_rows == 4
+    assert table.rewrite_original_rows == 6
+    assert len(table.compatible_file_groups) == 1
+    group = table.compatible_file_groups[0]
+    assert group.schema_version == 1
+    assert group.partition_id is None
+    assert group.merge_candidate_files == 3
+    assert group.merge_candidate_bytes == 600
 
     assert inventory.table_count == 1
     assert lake.table_count == 1
