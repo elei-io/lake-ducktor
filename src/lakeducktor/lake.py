@@ -131,6 +131,7 @@ def detect_metadata_backend(
 
     connection = duckdb.connect(database=":memory:", config={"threads": "1"})
     try:
+        connection.execute("PRAGMA disable_checkpoint_on_shutdown")
         connection.execute("INSTALL postgres")
         connection.execute("LOAD postgres")
         connection.execute("INSTALL ducklake")
@@ -145,38 +146,36 @@ def detect_metadata_backend(
         )
         uri = _sql_string(postgres_uri)
         detected: set[tuple[MetadataBackend, str]] = set()
-        for metadata_schema in metadata_schemas:
+        for index, metadata_schema in enumerate(metadata_schemas):
+            lake_alias = f"{_LAKE_ALIAS}_{index}"
             schema = _sql_string(metadata_schema)
             connection.execute(
                 f"""
-                ATTACH 'ducklake:postgres:{uri}' AS {_LAKE_ALIAS} (
+                ATTACH 'ducklake:postgres:{uri}' AS {lake_alias} (
                     METADATA_SCHEMA '{schema}',
                     READ_ONLY,
                     CREATE_IF_NOT_EXISTS false
                 )
                 """
             )
+            row = connection.execute(
+                """
+                SELECT catalog_type, extension_version
+                FROM ducklake_settings(?)
+                """,
+                [lake_alias],
+            ).fetchone()
+            if row is None:
+                raise BackendDetectionError(
+                    "DuckLake returned no metadata backend information"
+                )
             try:
-                row = connection.execute(
-                    """
-                    SELECT catalog_type, extension_version
-                    FROM ducklake_settings(?)
-                    """,
-                    [_LAKE_ALIAS],
-                ).fetchone()
-                if row is None:
-                    raise BackendDetectionError(
-                        "DuckLake returned no metadata backend information"
-                    )
-                try:
-                    backend = MetadataBackend(str(row[0]).lower())
-                except ValueError as error:
-                    raise BackendDetectionError(
-                        f"DuckLake reported an unsupported metadata backend: {row[0]}"
-                    ) from error
-                detected.add((backend, str(row[1])))
-            finally:
-                connection.execute(f"DETACH {_LAKE_ALIAS}")
+                backend = MetadataBackend(str(row[0]).lower())
+            except ValueError as error:
+                raise BackendDetectionError(
+                    f"DuckLake reported an unsupported metadata backend: {row[0]}"
+                ) from error
+            detected.add((backend, str(row[1])))
 
         if len(detected) != 1:
             raise BackendDetectionError(

@@ -175,7 +175,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "diagnosis lake=%s table_id=%s schema=%r table=%r "
                         "state=%s reasons=%s sorting_enabled=%s merge_groups=%s "
                         "merge_input_files=%s merge_input_bytes=%s "
-                        "expected_files_eliminated=%s rewrite_data_files=%s "
+                        "expected_files_eliminated=%s "
+                        "recent_data_files_60s=%s rewrite_data_files=%s "
                         "rewrite_input_bytes=%s rewrite_delete_files=%s "
                         "rewrite_deleted_rows=%s dangling_delete_files=%s",
                         table.metadata_schema,
@@ -189,6 +190,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         table.merge_input_files,
                         table.merge_input_bytes,
                         table.expected_files_eliminated,
+                        table.recent_data_files_60s,
                         table.rewrite_data_files,
                         table.rewrite_input_bytes,
                         table.rewrite_delete_files,
@@ -230,7 +232,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "sorting_enabled=%s "
                             "groups=%s input_files=%s input_bytes=%s "
                             "average_input_file_bytes=%s "
-                            "expected_files_eliminated=%s",
+                            "expected_files_eliminated=%s "
+                            "recent_data_files_60s=%s activity_penalty=%.2f "
+                            "adjusted_expected_files_eliminated=%.2f",
                             candidate.rank,
                             candidate.metadata_schema,
                             candidate.table_id,
@@ -246,6 +250,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                             candidate.input_bytes,
                             candidate.average_input_file_bytes,
                             candidate.expected_files_eliminated,
+                            candidate.recent_data_files_60s,
+                            candidate.activity_penalty,
+                            candidate.adjusted_expected_files_eliminated,
                         )
                     _LOGGER.info(
                         "priority_summary delete_rewrites=%s merges=%s "

@@ -17,6 +17,7 @@ LakeDucktor exposes metrics that distinguish demand from capacity:
 
 - actionable, runnable, blocked, and memory-deferred work
 - scheduled files and dangling delete files
+- recent insertion-file activity
 - running and stuck treatment state
 - treatment throughput, duration, outcomes, and files eliminated
 - estimated merge/rewrite file debt and claim contention

@@ -1,10 +1,19 @@
 from collections.abc import Iterable
+from unittest.mock import Mock, patch
 
+from lakeducktor.config import MetadataConfiguration
 from lakeducktor.inventory import (
     CompatibleFileGroupRow,
+    DuckDBInventorySource,
     LakeSummaryRow,
     TableInventoryRow,
     collect_inventory,
+    inventory_catalog,
+)
+from lakeducktor.model import (
+    BackendDetection,
+    CatalogInventory,
+    MetadataBackend,
 )
 
 
@@ -41,6 +50,7 @@ class FakeInventorySource:
                     20,
                     4,
                     6,
+                    5,
                 ),
             ),
             "lake_b": (),
@@ -87,6 +97,7 @@ def test_inventory_builds_immutable_physical_facts_without_a_connection() -> Non
     assert table.active_data_files == 3
     assert table.active_data_bytes == 600
     assert table.active_data_rows == 60
+    assert table.recent_data_files_60s == 5
     assert table.data_file_sizes.minimum_bytes == 100
     assert table.data_file_sizes.median_bytes == 200
     assert table.data_file_sizes.p90_bytes == 280
@@ -130,3 +141,53 @@ def test_inventory_preserves_empty_lakes_without_synthetic_values() -> None:
     assert lake.latest_snapshot_at is None
     assert lake.oldest_scheduled_at is None
     assert lake.tables == ()
+
+
+def test_merge_groups_exclude_files_native_compaction_will_skip() -> None:
+    connection = Mock()
+    inline_tables = Mock()
+    inline_tables.fetchall.return_value = [("ducklake_inlined_delete_7",)]
+    groups = Mock()
+    groups.fetchall.return_value = [(7, 1, None, 2, 100, 2, 100)]
+    connection.execute.side_effect = [inline_tables, groups]
+
+    rows = tuple(
+        DuckDBInventorySource(connection, "catalog").compatible_file_groups("lake")
+    )
+
+    assert rows == ((7, 1, None, 2, 100, 2, 100),)
+    query = connection.execute.call_args_list[1].args[0]
+    assert '"lake"."ducklake_delete_file"' in query
+    assert "NOT EXISTS" in query
+    assert '"lake"."ducklake_inlined_delete_7"' in query
+
+
+def test_inventory_disables_checkpoint_on_shutdown_before_attaching() -> None:
+    connection = Mock()
+    connection.execute.return_value = connection
+    expected = CatalogInventory(lakes=())
+    configuration = MetadataConfiguration(
+        backend_hint="postgres",
+        host="catalog.example",
+        port=5432,
+        username="user",
+        password="password",
+        database="lake",
+    )
+    detection = BackendDetection(
+        backend=MetadataBackend.POSTGRES,
+        metadata_schemas=("lake",),
+        extension_version="ducklake-version",
+        duckdb_extensions=(),
+    )
+
+    with (
+        patch("lakeducktor.inventory.duckdb.connect", return_value=connection),
+        patch("lakeducktor.inventory.collect_inventory", return_value=expected),
+    ):
+        result = inventory_catalog(configuration, detection)
+
+    assert result is expected
+    queries = [call.args[0] for call in connection.execute.call_args_list]
+    assert queries[0] == "PRAGMA disable_checkpoint_on_shutdown"
+    assert connection.close.call_count == 1

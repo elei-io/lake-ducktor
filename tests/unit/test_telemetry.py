@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
@@ -149,6 +150,41 @@ def test_treatment_progress_and_claim_contention_are_counted() -> None:
     assert 'lakeducktor_treatment_files_created_total{kind="merge"} 62.0' in metrics
     assert 'lakeducktor_treatment_files_eliminated_total{kind="merge"} 62.0' in metrics
     assert "lakeducktor_claim_contention_total 3.0" in metrics
+
+
+def test_recent_insertion_files_are_exposed_as_an_aggregate_metric() -> None:
+    worker = telemetry(FakeClock())
+    tables = (
+        SimpleNamespace(
+            state=SimpleNamespace(value="actionable"),
+            recent_data_files_60s=3,
+            rewrite_data_files=0,
+        ),
+        SimpleNamespace(
+            state=SimpleNamespace(value="healthy"),
+            recent_data_files_60s=4,
+            rewrite_data_files=0,
+        ),
+    )
+    worker.observe_plan(
+        SimpleNamespace(
+            scheduled_files=0,
+            lakes=(SimpleNamespace(dangling_delete_files=0),),
+        ),
+        SimpleNamespace(lakes=(SimpleNamespace(tables=tables),)),
+        SimpleNamespace(
+            excluded_tables=0,
+            attention_tables=0,
+            runnable=1,
+            blocked=0,
+            merges=(),
+        ),
+        memory_deferred=0,
+    )
+
+    metrics = generate_latest(worker.registry).decode()
+
+    assert 'lakeducktor_recent_data_files{window="60s"} 7.0' in metrics
 
 
 def test_http_health_endpoints_and_metrics_share_no_worker_connection() -> None:

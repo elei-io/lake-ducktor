@@ -202,6 +202,12 @@ class WorkerTelemetry:
             "Runnable treatments that do not fit this worker.",
             registry=self.registry,
         )
+        self._recent_data_files = Gauge(
+            "lakeducktor_recent_data_files",
+            "Active files created by insertion snapshots in the recent window.",
+            ("window",),
+            registry=self.registry,
+        )
         self._merge_file_debt = Gauge(
             "lakeducktor_merge_expected_files_eliminated",
             "Estimated files remaining to eliminate through merge treatments.",
@@ -257,6 +263,9 @@ class WorkerTelemetry:
         self._runnable_treatments.set(plan.runnable)
         self._blocked_treatments.set(plan.blocked)
         self._memory_deferred.set(memory_deferred)
+        self._recent_data_files.labels(window="60s").set(
+            sum(table.recent_data_files_60s for table in tables)
+        )
         self._merge_file_debt.set(
             sum(candidate.expected_files_eliminated for candidate in plan.merges)
         )

@@ -26,6 +26,7 @@ def table_inventory(**overrides) -> TableInventory:
         active_data_files=1,
         active_data_bytes=100,
         active_data_rows=10,
+        recent_data_files_60s=0,
         data_file_sizes=FileSizeDistribution(100, 100, 100, 100),
         compatible_file_groups=(),
         active_delete_files=0,
@@ -47,6 +48,12 @@ def test_healthy_table_has_no_actionable_debt() -> None:
 
     assert diagnosis.state is DiagnosisState.HEALTHY
     assert diagnosis.reasons == ("healthy",)
+
+
+def test_recent_file_activity_is_preserved_for_priority() -> None:
+    diagnosis = diagnose_table(table_inventory(recent_data_files_60s=7))
+
+    assert diagnosis.recent_data_files_60s == 7
 
 
 def test_merge_estimate_respects_compatible_group_boundaries() -> None:

@@ -66,6 +66,9 @@ def merge(
         average_input_file_bytes=50,
         target_file_size_bytes=target,
         expected_files_eliminated=5,
+        recent_data_files_60s=0,
+        activity_penalty=0,
+        adjusted_expected_files_eliminated=5,
         sorting_enabled=False,
     )
 

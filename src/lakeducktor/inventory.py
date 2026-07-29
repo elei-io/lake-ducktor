@@ -47,6 +47,7 @@ type TableInventoryRow = tuple[
     int,
     int,
     int,
+    int,
 ]
 type CompatibleFileGroupRow = tuple[
     int,
@@ -134,6 +135,11 @@ class DuckDBInventorySource:
         data_files = self._relation(metadata_schema, "ducklake_data_file")
         delete_files = self._relation(metadata_schema, "ducklake_delete_file")
         sort_info = self._relation(metadata_schema, "ducklake_sort_info")
+        snapshots = self._relation(metadata_schema, "ducklake_snapshot")
+        snapshot_changes = self._relation(
+            metadata_schema,
+            "ducklake_snapshot_changes",
+        )
         return self._connection.execute(
             f"""
             WITH active_tables AS (
@@ -223,7 +229,12 @@ class DuckDBInventorySource:
                 WHERE end_snapshot IS NULL
             ),
             active_data_files AS MATERIALIZED (
-                SELECT data_file_id, table_id, file_size_bytes, record_count
+                SELECT
+                    data_file_id,
+                    table_id,
+                    begin_snapshot,
+                    file_size_bytes,
+                    record_count
                 FROM {data_files}
                 WHERE end_snapshot IS NULL
             ),
@@ -245,6 +256,28 @@ class DuckDBInventorySource:
                     coalesce(max(file_size_bytes), 0) AS maximum_bytes
                 FROM active_data_files
                 GROUP BY table_id
+            ),
+            recent_insert_snapshots AS MATERIALIZED (
+                SELECT
+                    snapshots.snapshot_id,
+                    changes.changes_made
+                FROM {snapshots} AS snapshots
+                JOIN {snapshot_changes} AS changes USING (snapshot_id)
+                WHERE snapshots.snapshot_time
+                    >= current_timestamp - INTERVAL '1 minute'
+            ),
+            recent_data_file_summary AS (
+                SELECT
+                    data.table_id,
+                    count(*) AS file_count
+                FROM active_data_files AS data
+                JOIN recent_insert_snapshots AS snapshots
+                  ON snapshots.snapshot_id = data.begin_snapshot
+                WHERE list_contains(
+                    string_split(snapshots.changes_made, ','),
+                    concat('inserted_into_table:', data.table_id::VARCHAR)
+                )
+                GROUP BY data.table_id
             ),
             active_delete_files AS MATERIALIZED (
                 SELECT
@@ -333,10 +366,12 @@ class DuckDBInventorySource:
                 coalesce(rewrite.delete_file_count, 0),
                 coalesce(rewrite.delete_file_bytes, 0),
                 coalesce(rewrite.deleted_rows, 0),
-                coalesce(rewrite.original_rows, 0)
+                coalesce(rewrite.original_rows, 0),
+                coalesce(recent.file_count, 0)
             FROM active_tables AS tables
             LEFT JOIN active_sorts AS sorts USING (table_id)
             LEFT JOIN data_file_summary AS data USING (table_id)
+            LEFT JOIN recent_data_file_summary AS recent USING (table_id)
             LEFT JOIN delete_file_summary AS deletes USING (table_id)
             LEFT JOIN rewrite_summary AS rewrite USING (table_id)
             ORDER BY tables.table_id
@@ -359,6 +394,28 @@ class DuckDBInventorySource:
             metadata_schema,
             "ducklake_file_partition_value",
         )
+        delete_files = self._relation(metadata_schema, "ducklake_delete_file")
+        inlined_delete_tables = self._connection.execute(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_catalog = ?
+              AND table_schema = ?
+              AND regexp_matches(
+                    table_name,
+                    '^ducklake_inlined_delete_[0-9]+$'
+                  )
+            ORDER BY table_name
+            """,
+            [self._catalog_alias.strip('"'), metadata_schema],
+        ).fetchall()
+        if inlined_delete_tables:
+            inlined_deletions = "\nUNION ALL\n".join(
+                f"SELECT file_id FROM {self._relation(metadata_schema, str(row[0]))}"
+                for row in inlined_delete_tables
+            )
+        else:
+            inlined_deletions = "SELECT NULL::BIGINT AS file_id WHERE false"
         return self._connection.execute(
             f"""
             WITH active_tables AS (
@@ -395,13 +452,22 @@ class DuckDBInventorySource:
             ),
             active_data_files AS MATERIALIZED (
                 SELECT
-                    data_file_id,
-                    table_id,
-                    begin_snapshot,
-                    partition_id,
-                    file_size_bytes
-                FROM {data_files}
-                WHERE end_snapshot IS NULL
+                    data.data_file_id,
+                    data.table_id,
+                    data.begin_snapshot,
+                    data.partition_id,
+                    data.file_size_bytes
+                FROM {data_files} AS data
+                WHERE data.end_snapshot IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM {delete_files} AS deletes
+                      WHERE deletes.table_id = data.table_id
+                        AND deletes.data_file_id = data.data_file_id
+                  )
+                  AND data.data_file_id NOT IN (
+                      {inlined_deletions}
+                  )
             ),
             snapshot_ranges AS (
                 SELECT
@@ -496,6 +562,7 @@ def collect_inventory(
                 active_data_files=int(row[7]),
                 active_data_bytes=int(row[8]),
                 active_data_rows=int(row[9]),
+                recent_data_files_60s=int(row[24]),
                 data_file_sizes=FileSizeDistribution(
                     minimum_bytes=int(row[10]),
                     median_bytes=int(row[11]),
@@ -545,6 +612,7 @@ def inventory_catalog(
     connection = duckdb.connect(database=":memory:", config={"threads": "1"})
     attached = False
     try:
+        connection.execute("PRAGMA disable_checkpoint_on_shutdown")
         connection.execute("INSTALL postgres")
         connection.execute("LOAD postgres")
         uri = configuration.postgres_uri().replace("'", "''")

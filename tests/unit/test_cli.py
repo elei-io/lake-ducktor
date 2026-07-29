@@ -205,6 +205,7 @@ def test_diagnose_command_logs_lake_and_table_explanations(
         merge_input_files=4,
         merge_input_bytes=160,
         expected_files_eliminated=2,
+        recent_data_files_60s=0,
         rewrite_data_files=0,
         rewrite_input_bytes=0,
         rewrite_delete_files=0,
@@ -311,6 +312,9 @@ def test_prioritize_command_logs_separate_treatment_lanes(
         input_bytes=160,
         average_input_file_bytes=40,
         expected_files_eliminated=2,
+        recent_data_files_60s=8,
+        activity_penalty=2,
+        adjusted_expected_files_eliminated=0,
         sorting_enabled=False,
     )
     monkeypatch.setattr(
@@ -339,6 +343,9 @@ def test_prioritize_command_logs_separate_treatment_lanes(
             "schema='main' table='events' state=blocked "
             "blocked_by=delete_rewrite"
         )
+        and "recent_data_files_60s=8 activity_penalty=2.00 "
+        "adjusted_expected_files_eliminated=0.00"
+        in message
         for message in messages
     )
     assert (

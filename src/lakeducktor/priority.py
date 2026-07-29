@@ -20,6 +20,21 @@ class PriorityError(RuntimeError):
     """A diagnosis cannot be ranked without inventing missing information."""
 
 
+_RECENT_FILE_PENALTY_CAP = 32
+_RECENT_FILES_PER_ELIMINATION = 4
+
+
+def merge_activity_penalty(recent_data_files_60s: int) -> Fraction:
+    """Return the bounded merge penalty for files inserted in the last minute."""
+
+    if recent_data_files_60s < 0:
+        raise PriorityError("recent data file count cannot be negative")
+    return Fraction(
+        min(recent_data_files_60s, _RECENT_FILE_PENALTY_CAP),
+        _RECENT_FILES_PER_ELIMINATION,
+    )
+
+
 def _tables(diagnosis: CatalogDiagnosis) -> tuple[TableDiagnosis, ...]:
     return tuple(table for lake in diagnosis.lakes for table in lake.tables)
 
@@ -92,12 +107,16 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
 
     def merge_key(table: TableDiagnosis) -> tuple:
         blocked = (table.metadata_schema, table.table_id) in rewrite_keys
+        adjusted_eliminations = Fraction(
+            table.expected_files_eliminated
+        ) - merge_activity_penalty(table.recent_data_files_60s)
         relative_average_size = Fraction(
             table.merge_input_bytes,
             table.merge_input_files * table.target_file_size_bytes,
         )
         return (
             blocked,
+            -adjusted_eliminations,
             -table.expected_files_eliminated,
             relative_average_size,
             table.merge_input_bytes,
@@ -106,35 +125,44 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
         )
 
     merge_tables.sort(key=merge_key)
-    merges = tuple(
-        MergePriority(
-            rank=rank,
-            metadata_schema=table.metadata_schema,
-            table_id=table.table_id,
-            schema_name=table.schema_name,
-            table_name=table.table_name,
-            state=(
-                PriorityState.BLOCKED
-                if (table.metadata_schema, table.table_id) in rewrite_keys
-                else PriorityState.RUNNABLE
-            ),
-            blocked_by=(
-                TreatmentKind.DELETE_REWRITE
-                if (table.metadata_schema, table.table_id) in rewrite_keys
-                else None
-            ),
-            groups=table.merge_groups,
-            input_files=table.merge_input_files,
-            input_bytes=table.merge_input_bytes,
-            average_input_file_bytes=(
-                table.merge_input_bytes // table.merge_input_files
-            ),
-            target_file_size_bytes=table.target_file_size_bytes,
-            expected_files_eliminated=table.expected_files_eliminated,
-            sorting_enabled=table.sorting_enabled,
+    merge_priorities = []
+    for rank, table in enumerate(merge_tables, start=1):
+        activity_penalty = merge_activity_penalty(table.recent_data_files_60s)
+        adjusted_eliminations = (
+            Fraction(table.expected_files_eliminated) - activity_penalty
         )
-        for rank, table in enumerate(merge_tables, start=1)
-    )
+        merge_priorities.append(
+            MergePriority(
+                rank=rank,
+                metadata_schema=table.metadata_schema,
+                table_id=table.table_id,
+                schema_name=table.schema_name,
+                table_name=table.table_name,
+                state=(
+                    PriorityState.BLOCKED
+                    if (table.metadata_schema, table.table_id) in rewrite_keys
+                    else PriorityState.RUNNABLE
+                ),
+                blocked_by=(
+                    TreatmentKind.DELETE_REWRITE
+                    if (table.metadata_schema, table.table_id) in rewrite_keys
+                    else None
+                ),
+                groups=table.merge_groups,
+                input_files=table.merge_input_files,
+                input_bytes=table.merge_input_bytes,
+                average_input_file_bytes=(
+                    table.merge_input_bytes // table.merge_input_files
+                ),
+                target_file_size_bytes=table.target_file_size_bytes,
+                expected_files_eliminated=table.expected_files_eliminated,
+                recent_data_files_60s=table.recent_data_files_60s,
+                activity_penalty=float(activity_penalty),
+                adjusted_expected_files_eliminated=float(adjusted_eliminations),
+                sorting_enabled=table.sorting_enabled,
+            )
+        )
+    merges = tuple(merge_priorities)
 
     return PriorityPlan(
         delete_rewrites=delete_rewrites,

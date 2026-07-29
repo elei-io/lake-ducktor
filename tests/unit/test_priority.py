@@ -24,6 +24,7 @@ def table_diagnosis(table_id: int, **overrides) -> TableDiagnosis:
         target_file_size_bytes=100,
         sorting_enabled=False,
         active_data_bytes=100,
+        recent_data_files_60s=0,
         merge_groups=0,
         merge_input_files=0,
         merge_input_bytes=0,
@@ -152,6 +153,53 @@ def test_merge_ranking_is_deterministic_and_benefit_first() -> None:
 
     assert [candidate.table_id for candidate in plan.merges] == [5, 3, 9]
     assert plan.merges[1].average_input_file_bytes == 10
+
+
+def test_recent_writes_apply_a_small_bounded_merge_penalty() -> None:
+    active = table_diagnosis(
+        1,
+        state=DiagnosisState.ACTIONABLE,
+        reasons=("merge_pressure",),
+        merge_groups=1,
+        merge_input_files=10,
+        merge_input_bytes=100,
+        expected_files_eliminated=10,
+        recent_data_files_60s=32,
+    )
+    quiet = table_diagnosis(
+        2,
+        state=DiagnosisState.ACTIONABLE,
+        reasons=("merge_pressure",),
+        merge_groups=1,
+        merge_input_files=4,
+        merge_input_bytes=40,
+        expected_files_eliminated=3,
+    )
+
+    plan = prioritize(catalog(active, quiet))
+
+    assert [candidate.table_id for candidate in plan.merges] == [2, 1]
+    assert plan.merges[1].activity_penalty == 8
+    assert plan.merges[1].adjusted_expected_files_eliminated == 2
+
+
+def test_recent_write_penalty_is_capped_at_32_files() -> None:
+    candidate = table_diagnosis(
+        1,
+        state=DiagnosisState.ACTIONABLE,
+        reasons=("merge_pressure",),
+        merge_groups=1,
+        merge_input_files=10,
+        merge_input_bytes=100,
+        expected_files_eliminated=9,
+        recent_data_files_60s=100,
+    )
+
+    merge = prioritize(catalog(candidate)).merges[0]
+
+    assert merge.recent_data_files_60s == 100
+    assert merge.activity_penalty == 8
+    assert merge.adjusted_expected_files_eliminated == 1
 
 
 def test_excluded_and_attention_tables_remain_observable_but_unqueued() -> None:

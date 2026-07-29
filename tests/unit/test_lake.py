@@ -1,11 +1,13 @@
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
+from lakeducktor.config import MetadataConfiguration
 from lakeducktor.lake import (
     BackendDetectionError,
     _loaded_duckdb_extensions,
     _select_metadata_schemas,
+    detect_metadata_backend,
 )
 
 
@@ -77,3 +79,37 @@ def test_loaded_duckdb_extensions_are_detected() -> None:
     ]
     assert extensions[0].source == "built-in"
     connection.execute.assert_called_once()
+
+
+def test_detection_never_detaches_a_ducklake_or_checkpoints_on_shutdown() -> None:
+    connection = Mock()
+
+    def execute(query: str, parameters: object = None) -> Mock:
+        result = Mock()
+        if "information_schema.tables" in query:
+            result.fetchall.return_value = [("lake_a",), ("lake_b",)]
+        elif "ducklake_settings" in query:
+            result.fetchone.return_value = ("postgres", "ducklake-version")
+        elif "duckdb_extensions()" in query:
+            result.fetchall.return_value = []
+        return result
+
+    connection.execute.side_effect = execute
+    configuration = MetadataConfiguration(
+        backend_hint="postgres",
+        host="catalog.example",
+        port=5432,
+        username="user",
+        password="password",
+        database="lake",
+    )
+
+    with patch("lakeducktor.lake.duckdb.connect", return_value=connection):
+        detection = detect_metadata_backend(configuration)
+
+    assert detection.metadata_schemas == ("lake_a", "lake_b")
+    queries = [call.args[0] for call in connection.execute.call_args_list]
+    assert queries[0] == "PRAGMA disable_checkpoint_on_shutdown"
+    assert sum("ATTACH 'ducklake:" in query for query in queries) == 2
+    assert not any("DETACH lakeducktor_lake" in query for query in queries)
+    assert connection.close.call_count == 1

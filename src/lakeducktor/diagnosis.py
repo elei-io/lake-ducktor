@@ -77,6 +77,7 @@ def diagnose_table(table: TableInventory) -> TableDiagnosis:
         target_file_size_bytes=table.target_file_size_bytes,
         sorting_enabled=table.sorting_enabled,
         active_data_bytes=table.active_data_bytes,
+        recent_data_files_60s=table.recent_data_files_60s,
         merge_groups=merge_groups,
         merge_input_files=merge_input_files,
         merge_input_bytes=merge_input_bytes,

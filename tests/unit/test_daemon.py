@@ -81,6 +81,7 @@ def table(table_id: int, *, files: int = 0, file_bytes: int = 0) -> TableInvento
         active_data_files=files,
         active_data_bytes=file_bytes,
         active_data_rows=files,
+        recent_data_files_60s=0,
         data_file_sizes=FileSizeDistribution(0, 0, 0, 0),
         compatible_file_groups=groups,
         active_delete_files=0,

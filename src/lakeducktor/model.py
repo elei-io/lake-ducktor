@@ -103,6 +103,7 @@ class TableInventory:
     active_data_files: int
     active_data_bytes: int
     active_data_rows: int
+    recent_data_files_60s: int
     data_file_sizes: FileSizeDistribution
     compatible_file_groups: tuple[CompatibleFileGroup, ...]
     active_delete_files: int
@@ -191,6 +192,7 @@ class TableDiagnosis:
     target_file_size_bytes: int
     sorting_enabled: bool
     active_data_bytes: int
+    recent_data_files_60s: int
     merge_groups: int
     merge_input_files: int
     merge_input_bytes: int
@@ -260,6 +262,9 @@ class MergePriority:
     average_input_file_bytes: int
     target_file_size_bytes: int
     expected_files_eliminated: int
+    recent_data_files_60s: int
+    activity_penalty: float
+    adjusted_expected_files_eliminated: float
     sorting_enabled: bool
 
 

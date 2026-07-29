@@ -167,6 +167,14 @@ partition and schema group.
 The exact formula is not a contract. The reusable principle is to rank expected
 benefit using information that the native operation will actually honor.
 
+Recent writer activity is a small negative merge signal. LakeDucktor counts
+active data files created by insertion snapshots during the previous minute,
+then subtracts one expected file elimination per four recent files, capped at
+eight. This lets similarly valuable quiet tables go first without making a
+continuously written table ineligible or allowing the penalty to grow without
+bound. Delete rewrites are unaffected because leaving delete-heavy data in
+place has a different correctness and cost profile.
+
 Delete rewrites have a different benefit model: live input bytes describe
 cost, while eligible delete files, deleted rows, and deleted fraction describe
 benefit. Different treatments should not be forced into a misleading common
