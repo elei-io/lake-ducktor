@@ -70,6 +70,7 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
             deleted_fraction=(table.rewrite_deleted_rows / table.rewrite_original_rows),
             input_bytes=table.rewrite_input_bytes,
             table_footprint_bytes=table.active_data_bytes,
+            sorting_enabled=table.sorting_enabled,
         )
         for rank, table in enumerate(rewrite_tables, start=1)
     )
@@ -130,6 +131,7 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
             ),
             target_file_size_bytes=table.target_file_size_bytes,
             expected_files_eliminated=table.expected_files_eliminated,
+            sorting_enabled=table.sorting_enabled,
         )
         for rank, table in enumerate(merge_tables, start=1)
     )

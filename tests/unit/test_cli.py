@@ -200,6 +200,7 @@ def test_diagnose_command_logs_lake_and_table_explanations(
         table_name="events",
         state=SimpleNamespace(value="actionable"),
         reasons=("merge_pressure",),
+        sorting_enabled=False,
         merge_groups=1,
         merge_input_files=4,
         merge_input_bytes=160,
@@ -295,6 +296,7 @@ def test_prioritize_command_logs_separate_treatment_lanes(
         original_rows=100,
         deleted_fraction=0.96,
         input_bytes=200,
+        sorting_enabled=False,
     )
     merge = SimpleNamespace(
         rank=1,
@@ -309,6 +311,7 @@ def test_prioritize_command_logs_separate_treatment_lanes(
         input_bytes=160,
         average_input_file_bytes=40,
         expected_files_eliminated=2,
+        sorting_enabled=False,
     )
     monkeypatch.setattr(
         "lakeducktor.cli.prioritize",
@@ -399,6 +402,9 @@ def test_select_command_logs_resource_envelope_and_one_treatment(
         table_name="events",
         input_bytes=1_000,
         admitted_bytes=512,
+        sorting_enabled=False,
+        memory_headroom_bytes=1_000_000_000,
+        usable_memory_bytes=3_000_000_000,
         max_compacted_files=1,
     )
     monkeypatch.setattr(
@@ -421,6 +427,8 @@ def test_select_command_logs_resource_envelope_and_one_treatment(
     assert (
         "selected treatment=merge priority_rank=1 lake=lake_a table_id=7 "
         "schema='main' table='events' input_bytes=1000 admitted_bytes=512 "
+        "sorting_enabled=false memory_headroom_bytes=1000000000 "
+        "usable_memory_bytes=3000000000 "
         "max_compacted_files=1 memory_deferred=2"
     ) in messages
 
@@ -491,6 +499,9 @@ def test_maintain_command_logs_verified_treatment_outcome(
         table_name="events",
         input_bytes=1_000,
         admitted_bytes=512,
+        sorting_enabled=False,
+        memory_headroom_bytes=1_000_000_000,
+        usable_memory_bytes=3_000_000_000,
         max_compacted_files=1,
     )
     monkeypatch.setattr(
@@ -514,5 +525,6 @@ def test_maintain_command_logs_verified_treatment_outcome(
     assert (
         "treatment_completed kind=merge lake=lake_a table_id=7 "
         "files_processed=4 files_created=1 duration_seconds=12.500 "
+        "sorting_enabled=false "
         "table_present=true still_actionable=false claim_contention=1"
     ) in messages

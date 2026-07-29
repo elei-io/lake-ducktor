@@ -201,6 +201,22 @@ of target-sized outputs that fit, capped by the diagnosed output count.
 Oversized work remains reported as memory-deferred and does not block an
 independent treatment.
 
+Admission reads the table's current active sort configuration from
+`ducklake_sort_info`. This is refreshed after claiming because DuckLake applies
+the sort order active when compaction runs, rather than the order used when the
+input files were written.
+
+The output budget retains explicit memory headroom:
+
+- unsorted treatments reserve 25% of `DUCKDB_MEMORY`;
+- sorted treatments reserve 50%; and
+- every treatment reserves at least 125 MB per configured DuckDB thread.
+
+The largest applicable reserve wins. The remaining memory determines merge
+batch size and whether a full-table delete rewrite fits. Sorting state,
+headroom, usable memory, and the resulting native bound are logged with the
+selection and refreshed treatment.
+
 `lakeducktor select` performs this decision without claiming or changing lake
 state. Thread count is part of the eventual execution envelope; it does not
 alter treatment priority.

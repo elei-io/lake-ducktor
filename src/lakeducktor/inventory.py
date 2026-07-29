@@ -29,6 +29,7 @@ type TableInventoryRow = tuple[
     bool,
     int,
     float,
+    bool,
     int,
     int,
     int,
@@ -132,6 +133,7 @@ class DuckDBInventorySource:
         metadata = self._relation(metadata_schema, "ducklake_metadata")
         data_files = self._relation(metadata_schema, "ducklake_data_file")
         delete_files = self._relation(metadata_schema, "ducklake_delete_file")
+        sort_info = self._relation(metadata_schema, "ducklake_sort_info")
         return self._connection.execute(
             f"""
             WITH active_tables AS (
@@ -214,6 +216,11 @@ class DuckDBInventorySource:
                   ON schemas.schema_id = tables.schema_id
                  AND schemas.end_snapshot IS NULL
                 WHERE tables.end_snapshot IS NULL
+            ),
+            active_sorts AS (
+                SELECT DISTINCT table_id
+                FROM {sort_info}
+                WHERE end_snapshot IS NULL
             ),
             active_data_files AS MATERIALIZED (
                 SELECT data_file_id, table_id, file_size_bytes, record_count
@@ -309,6 +316,7 @@ class DuckDBInventorySource:
                 tables.auto_compact,
                 tables.target_file_size_bytes,
                 tables.rewrite_delete_threshold,
+                sorts.table_id IS NOT NULL AS sorting_enabled,
                 coalesce(data.file_count, 0),
                 coalesce(data.file_bytes, 0),
                 coalesce(data.row_count, 0),
@@ -327,6 +335,7 @@ class DuckDBInventorySource:
                 coalesce(rewrite.deleted_rows, 0),
                 coalesce(rewrite.original_rows, 0)
             FROM active_tables AS tables
+            LEFT JOIN active_sorts AS sorts USING (table_id)
             LEFT JOIN data_file_summary AS data USING (table_id)
             LEFT JOIN delete_file_summary AS deletes USING (table_id)
             LEFT JOIN rewrite_summary AS rewrite USING (table_id)
@@ -483,26 +492,27 @@ def collect_inventory(
                 auto_compact=bool(row[3]),
                 target_file_size_bytes=int(row[4]),
                 rewrite_delete_threshold=float(row[5]),
-                active_data_files=int(row[6]),
-                active_data_bytes=int(row[7]),
-                active_data_rows=int(row[8]),
+                sorting_enabled=bool(row[6]),
+                active_data_files=int(row[7]),
+                active_data_bytes=int(row[8]),
+                active_data_rows=int(row[9]),
                 data_file_sizes=FileSizeDistribution(
-                    minimum_bytes=int(row[9]),
-                    median_bytes=int(row[10]),
-                    p90_bytes=int(row[11]),
-                    maximum_bytes=int(row[12]),
+                    minimum_bytes=int(row[10]),
+                    median_bytes=int(row[11]),
+                    p90_bytes=int(row[12]),
+                    maximum_bytes=int(row[13]),
                 ),
                 compatible_file_groups=tuple(groups_by_table.get(int(row[0]), ())),
-                active_delete_files=int(row[13]),
-                active_delete_bytes=int(row[14]),
-                deleted_rows=int(row[15]),
-                dangling_delete_files=int(row[16]),
-                rewrite_data_files=int(row[17]),
-                rewrite_input_bytes=int(row[18]),
-                rewrite_delete_files=int(row[19]),
-                rewrite_delete_bytes=int(row[20]),
-                rewrite_deleted_rows=int(row[21]),
-                rewrite_original_rows=int(row[22]),
+                active_delete_files=int(row[14]),
+                active_delete_bytes=int(row[15]),
+                deleted_rows=int(row[16]),
+                dangling_delete_files=int(row[17]),
+                rewrite_data_files=int(row[18]),
+                rewrite_input_bytes=int(row[19]),
+                rewrite_delete_files=int(row[20]),
+                rewrite_delete_bytes=int(row[21]),
+                rewrite_deleted_rows=int(row[22]),
+                rewrite_original_rows=int(row[23]),
             )
             for row in source.tables(metadata_schema)
         )

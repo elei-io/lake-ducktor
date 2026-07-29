@@ -23,6 +23,7 @@ class FakeInventorySource:
                     True,
                     256,
                     0.5,
+                    True,
                     3,
                     600,
                     60,
@@ -82,6 +83,7 @@ def test_inventory_builds_immutable_physical_facts_without_a_connection() -> Non
     assert table.auto_compact is True
     assert table.target_file_size_bytes == 256
     assert table.rewrite_delete_threshold == 0.5
+    assert table.sorting_enabled is True
     assert table.active_data_files == 3
     assert table.active_data_bytes == 600
     assert table.active_data_rows == 60

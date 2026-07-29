@@ -42,7 +42,9 @@ _DETECTION = BackendDetection(
     duckdb_extensions=(),
 )
 _ENVELOPE = ResourceEnvelope(
-    duckdb_threads=4, duckdb_memory="1KB", duckdb_memory_bytes=1_000
+    duckdb_threads=4,
+    duckdb_memory="500001000B",
+    duckdb_memory_bytes=500_001_000,
 )
 
 
@@ -69,6 +71,7 @@ def table(table_id: int, *, files: int = 0, file_bytes: int = 0) -> TableInvento
         auto_compact=True,
         target_file_size_bytes=100,
         rewrite_delete_threshold=0.95,
+        sorting_enabled=False,
         active_data_files=files,
         active_data_bytes=file_bytes,
         active_data_rows=files,

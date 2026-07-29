@@ -48,6 +48,9 @@ def selection(
         table_name="events",
         input_bytes=100,
         admitted_bytes=200,
+        sorting_enabled=False,
+        memory_headroom_bytes=1_000,
+        usable_memory_bytes=3_000,
         max_compacted_files=max_compacted_files,
     )
 

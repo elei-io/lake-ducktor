@@ -182,7 +182,8 @@ def maintain_once(
                 _LOGGER.info(
                     "treatment_started kind=%s lake=%s table_id=%s "
                     "schema=%r table=%r input_bytes=%s admitted_bytes=%s "
-                    "max_compacted_files=%s",
+                    "sorting_enabled=%s memory_headroom_bytes=%s "
+                    "usable_memory_bytes=%s max_compacted_files=%s",
                     selection.kind.value,
                     selection.metadata_schema,
                     selection.table_id,
@@ -190,6 +191,9 @@ def maintain_once(
                     selection.table_name,
                     selection.input_bytes,
                     selection.admitted_bytes,
+                    str(selection.sorting_enabled).lower(),
+                    selection.memory_headroom_bytes,
+                    selection.usable_memory_bytes,
                     selection.max_compacted_files
                     if selection.max_compacted_files is not None
                     else "none",

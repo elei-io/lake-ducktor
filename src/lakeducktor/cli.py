@@ -153,7 +153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for table in lake.tables:
                     _LOGGER.info(
                         "diagnosis lake=%s table_id=%s schema=%r table=%r "
-                        "state=%s reasons=%s merge_groups=%s "
+                        "state=%s reasons=%s sorting_enabled=%s merge_groups=%s "
                         "merge_input_files=%s merge_input_bytes=%s "
                         "expected_files_eliminated=%s rewrite_data_files=%s "
                         "rewrite_input_bytes=%s rewrite_delete_files=%s "
@@ -164,6 +164,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         table.table_name,
                         table.state.value,
                         ",".join(table.reasons),
+                        str(table.sorting_enabled).lower(),
                         table.merge_groups,
                         table.merge_input_files,
                         table.merge_input_bytes,
@@ -185,6 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         _LOGGER.info(
                             "priority kind=delete_rewrite rank=%s lake=%s "
                             "table_id=%s schema=%r table=%r state=runnable "
+                            "sorting_enabled=%s "
                             "data_files=%s delete_files=%s deleted_rows=%s "
                             "original_rows=%s deleted_fraction=%.6f "
                             "input_bytes=%s",
@@ -193,6 +195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             candidate.table_id,
                             candidate.schema_name,
                             candidate.table_name,
+                            str(candidate.sorting_enabled).lower(),
                             candidate.data_files,
                             candidate.delete_files,
                             candidate.deleted_rows,
@@ -204,6 +207,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         _LOGGER.info(
                             "priority kind=merge rank=%s lake=%s table_id=%s "
                             "schema=%r table=%r state=%s blocked_by=%s "
+                            "sorting_enabled=%s "
                             "groups=%s input_files=%s input_bytes=%s "
                             "average_input_file_bytes=%s "
                             "expected_files_eliminated=%s",
@@ -216,6 +220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             candidate.blocked_by.value
                             if candidate.blocked_by is not None
                             else "none",
+                            str(candidate.sorting_enabled).lower(),
                             candidate.groups,
                             candidate.input_files,
                             candidate.input_bytes,
@@ -258,7 +263,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                             _LOGGER.info(
                                 "selected treatment=%s priority_rank=%s lake=%s "
                                 "table_id=%s schema=%r table=%r input_bytes=%s "
-                                "admitted_bytes=%s max_compacted_files=%s "
+                                "admitted_bytes=%s sorting_enabled=%s "
+                                "memory_headroom_bytes=%s "
+                                "usable_memory_bytes=%s max_compacted_files=%s "
                                 "memory_deferred=%s",
                                 selected.kind.value,
                                 selected.priority_rank,
@@ -268,6 +275,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 selected.table_name,
                                 selected.input_bytes,
                                 selected.admitted_bytes,
+                                str(selected.sorting_enabled).lower(),
+                                selected.memory_headroom_bytes,
+                                selected.usable_memory_bytes,
                                 selected.max_compacted_files
                                 if selected.max_compacted_files is not None
                                 else "none",
@@ -320,7 +330,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             _LOGGER.info(
                                 "treatment_completed kind=%s lake=%s table_id=%s "
                                 "files_processed=%s files_created=%s "
-                                "duration_seconds=%.3f table_present=%s "
+                                "duration_seconds=%.3f sorting_enabled=%s "
+                                "table_present=%s "
                                 "still_actionable=%s claim_contention=%s",
                                 outcome.selection.kind.value,
                                 outcome.selection.metadata_schema,
@@ -328,6 +339,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 outcome.result.files_processed,
                                 outcome.result.files_created,
                                 outcome.duration_seconds,
+                                str(outcome.selection.sorting_enabled).lower(),
                                 str(outcome.table_present).lower(),
                                 str(outcome.still_actionable).lower(),
                                 outcome.claim_contention,

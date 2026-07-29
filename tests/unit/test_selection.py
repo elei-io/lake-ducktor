@@ -11,12 +11,17 @@ from lakeducktor.model import (
     SelectionReason,
     TreatmentKind,
 )
-from lakeducktor.selection import SelectionError, readmit_treatment, select_treatment
+from lakeducktor.selection import (
+    SelectionError,
+    readmit_treatment,
+    select_treatment,
+    treatment_memory_budget,
+)
 
 _ENVELOPE = ResourceEnvelope(
-    duckdb_threads=4,
-    duckdb_memory="250B",
-    duckdb_memory_bytes=250,
+    duckdb_threads=1,
+    duckdb_memory="125000250B",
+    duckdb_memory_bytes=125_000_250,
 )
 
 
@@ -34,6 +39,7 @@ def rewrite(rank: int, table_id: int, footprint: int) -> DeleteRewritePriority:
         deleted_fraction=0.96,
         input_bytes=100,
         table_footprint_bytes=footprint,
+        sorting_enabled=False,
     )
 
 
@@ -60,6 +66,7 @@ def merge(
         average_input_file_bytes=50,
         target_file_size_bytes=target,
         expected_files_eliminated=5,
+        sorting_enabled=False,
     )
 
 
@@ -181,3 +188,42 @@ def test_revalidation_keeps_identity_but_refreshes_name_and_bound() -> None:
     assert refreshed.table_name == "renamed"
     assert refreshed.priority_rank == 4
     assert refreshed.max_compacted_files == 2
+
+
+def test_sorted_treatment_reserves_more_memory_headroom() -> None:
+    envelope = ResourceEnvelope(4, "4GB", 4_000_000_000)
+
+    assert treatment_memory_budget(envelope, False) == (
+        1_000_000_000,
+        3_000_000_000,
+    )
+    assert treatment_memory_budget(envelope, True) == (
+        2_000_000_000,
+        2_000_000_000,
+    )
+
+
+def test_thread_minimum_can_consume_the_available_treatment_budget() -> None:
+    envelope = ResourceEnvelope(8, "1GB", 1_000_000_000)
+
+    assert treatment_memory_budget(envelope, False) == (1_000_000_000, 0)
+
+
+def test_current_sorting_state_reduces_native_merge_batch() -> None:
+    envelope = ResourceEnvelope(4, "4GB", 4_000_000_000)
+    unsorted = replace(merge(1, 1, target=500_000_000), sorting_enabled=False)
+    sorted_table = replace(unsorted, sorting_enabled=True)
+
+    unsorted_selection = select_treatment(
+        plan(merges=(unsorted,)),
+        envelope,
+    ).selected
+    sorted_selection = select_treatment(
+        plan(merges=(sorted_table,)),
+        envelope,
+    ).selected
+
+    assert unsorted_selection is not None
+    assert sorted_selection is not None
+    assert unsorted_selection.max_compacted_files == 5
+    assert sorted_selection.max_compacted_files == 4

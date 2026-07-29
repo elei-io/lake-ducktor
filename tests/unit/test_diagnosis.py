@@ -22,6 +22,7 @@ def table_inventory(**overrides) -> TableInventory:
         auto_compact=True,
         target_file_size_bytes=100,
         rewrite_delete_threshold=0.95,
+        sorting_enabled=False,
         active_data_files=1,
         active_data_bytes=100,
         active_data_rows=10,

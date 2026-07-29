@@ -19,6 +19,31 @@ class SelectionError(RuntimeError):
     """A priority candidate cannot be admitted safely."""
 
 
+_MINIMUM_BYTES_PER_THREAD = 125_000_000
+_UNSORTED_HEADROOM_DIVISOR = 4
+_SORTED_HEADROOM_DIVISOR = 2
+
+
+def treatment_memory_budget(
+    envelope: ResourceEnvelope,
+    sorting_enabled: bool,
+) -> tuple[int, int]:
+    """Return reserved headroom and usable output memory for one treatment."""
+
+    ratio_denominator = (
+        _SORTED_HEADROOM_DIVISOR if sorting_enabled else _UNSORTED_HEADROOM_DIVISOR
+    )
+    ratio_headroom = (
+        envelope.duckdb_memory_bytes + ratio_denominator - 1
+    ) // ratio_denominator
+    thread_headroom = envelope.duckdb_threads * _MINIMUM_BYTES_PER_THREAD
+    headroom = min(
+        envelope.duckdb_memory_bytes,
+        max(ratio_headroom, thread_headroom),
+    )
+    return headroom, envelope.duckdb_memory_bytes - headroom
+
+
 def _rewrite_selection(
     candidate: DeleteRewritePriority,
     envelope: ResourceEnvelope,
@@ -28,7 +53,11 @@ def _rewrite_selection(
             "delete rewrite has an invalid table footprint for "
             f"table_id={candidate.table_id}"
         )
-    if candidate.table_footprint_bytes > envelope.duckdb_memory_bytes:
+    headroom, usable_memory = treatment_memory_budget(
+        envelope,
+        candidate.sorting_enabled,
+    )
+    if candidate.table_footprint_bytes > usable_memory:
         return None
     return TreatmentSelection(
         kind=TreatmentKind.DELETE_REWRITE,
@@ -39,6 +68,9 @@ def _rewrite_selection(
         table_name=candidate.table_name,
         input_bytes=candidate.input_bytes,
         admitted_bytes=candidate.table_footprint_bytes,
+        sorting_enabled=candidate.sorting_enabled,
+        memory_headroom_bytes=headroom,
+        usable_memory_bytes=usable_memory,
         max_compacted_files=None,
     )
 
@@ -56,7 +88,11 @@ def _merge_selection(
         raise SelectionError(
             f"merge has an invalid output estimate for table_id={candidate.table_id}"
         )
-    output_capacity = envelope.duckdb_memory_bytes // candidate.target_file_size_bytes
+    headroom, usable_memory = treatment_memory_budget(
+        envelope,
+        candidate.sorting_enabled,
+    )
+    output_capacity = usable_memory // candidate.target_file_size_bytes
     if output_capacity == 0:
         return None
     max_compacted_files = min(expected_output_files, output_capacity)
@@ -69,6 +105,9 @@ def _merge_selection(
         table_name=candidate.table_name,
         input_bytes=candidate.input_bytes,
         admitted_bytes=max_compacted_files * candidate.target_file_size_bytes,
+        sorting_enabled=candidate.sorting_enabled,
+        memory_headroom_bytes=headroom,
+        usable_memory_bytes=usable_memory,
         max_compacted_files=max_compacted_files,
     )
 

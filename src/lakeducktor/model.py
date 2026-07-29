@@ -99,6 +99,7 @@ class TableInventory:
     auto_compact: bool
     target_file_size_bytes: int
     rewrite_delete_threshold: float
+    sorting_enabled: bool
     active_data_files: int
     active_data_bytes: int
     active_data_rows: int
@@ -188,6 +189,7 @@ class TableDiagnosis:
     state: DiagnosisState
     reasons: tuple[str, ...]
     target_file_size_bytes: int
+    sorting_enabled: bool
     active_data_bytes: int
     merge_groups: int
     merge_input_files: int
@@ -240,6 +242,7 @@ class DeleteRewritePriority:
     deleted_fraction: float
     input_bytes: int
     table_footprint_bytes: int
+    sorting_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,6 +260,7 @@ class MergePriority:
     average_input_file_bytes: int
     target_file_size_bytes: int
     expected_files_eliminated: int
+    sorting_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +300,9 @@ class TreatmentSelection:
     table_name: str
     input_bytes: int
     admitted_bytes: int
+    sorting_enabled: bool
+    memory_headroom_bytes: int
+    usable_memory_bytes: int
     max_compacted_files: int | None
 
 
