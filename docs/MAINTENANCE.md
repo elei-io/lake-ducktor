@@ -187,6 +187,24 @@ prove starvation freedom when high-pressure work arrives continuously.
 LakeDucktor should treat long-term fairness as an explicit property rather than
 assuming a scoring heuristic provides it.
 
+### Select one treatment
+
+Each worker has a fixed `DUCKDB_THREADS` and `DUCKDB_MEMORY` envelope and
+selects at most one treatment. Selection scans the ranked delete-rewrite lane,
+then the ranked runnable-merge lane; it does not manufacture a score that
+compares unlike treatments.
+
+A delete rewrite is admitted only when the complete active table footprint
+fits the memory envelope. A merge is admitted when at least one target-sized
+output fits. Its native `max_compacted_files` bound is derived from the number
+of target-sized outputs that fit, capped by the diagnosed output count.
+Oversized work remains reported as memory-deferred and does not block an
+independent treatment.
+
+`lakeducktor select` performs this decision without claiming or changing lake
+state. Thread count is part of the eventual execution envelope; it does not
+alter treatment priority.
+
 ## Performance and resource safety
 
 ### Understand what a native bound really bounds

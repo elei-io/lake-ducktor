@@ -22,6 +22,7 @@ def table_diagnosis(table_id: int, **overrides) -> TableDiagnosis:
         state=DiagnosisState.HEALTHY,
         reasons=("healthy",),
         target_file_size_bytes=100,
+        active_data_bytes=100,
         merge_groups=0,
         merge_input_files=0,
         merge_input_bytes=0,

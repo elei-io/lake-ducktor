@@ -3,7 +3,16 @@ from types import SimpleNamespace
 
 from lakeducktor import __version__
 from lakeducktor.cli import main
-from lakeducktor.model import BackendDetection, DuckDBExtension, MetadataBackend
+from lakeducktor.model import (
+    BackendDetection,
+    DuckDBExtension,
+    MetadataBackend,
+    ResourceEnvelope,
+    SelectionDecision,
+    SelectionReason,
+    TreatmentKind,
+    TreatmentSelection,
+)
 
 _EXTENSIONS = (
     DuckDBExtension(
@@ -329,4 +338,85 @@ def test_prioritize_command_logs_separate_treatment_lanes(
     assert (
         "priority_summary delete_rewrites=1 merges=1 runnable=1 blocked=1 "
         "excluded=0 attention=0"
+    ) in messages
+
+
+def test_select_command_logs_resource_envelope_and_one_treatment(
+    monkeypatch,
+    caplog,
+    tmp_path,
+) -> None:
+    caplog.set_level(logging.INFO, logger="lakeducktor")
+    monkeypatch.setattr(
+        "lakeducktor.cli.MetadataConfiguration.from_environment",
+        lambda: object(),
+    )
+    detection = BackendDetection(
+        backend=MetadataBackend.POSTGRES,
+        metadata_schemas=("lake_a",),
+        extension_version="v1",
+        duckdb_extensions=_EXTENSIONS,
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.detect_metadata_backend",
+        lambda _configuration: detection,
+    )
+    inventory_lake = SimpleNamespace(
+        metadata_schema="lake_a",
+        latest_snapshot_id=11,
+        table_count=0,
+        active_data_files=0,
+        active_data_bytes=0,
+        active_delete_files=0,
+        active_delete_bytes=0,
+        dangling_delete_files=0,
+        scheduled_files=0,
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.inventory_catalog",
+        lambda _configuration, _detection: SimpleNamespace(lakes=(inventory_lake,)),
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.diagnose_inventory",
+        lambda _inventory: SimpleNamespace(lakes=()),
+    )
+    plan = SimpleNamespace()
+    monkeypatch.setattr("lakeducktor.cli.prioritize", lambda _diagnosis: plan)
+    envelope = ResourceEnvelope(4, "4GB", 4_000_000_000)
+    monkeypatch.setattr(
+        "lakeducktor.cli.resource_envelope_from_environment",
+        lambda: envelope,
+    )
+    selected = TreatmentSelection(
+        kind=TreatmentKind.MERGE,
+        priority_rank=1,
+        metadata_schema="lake_a",
+        table_id=7,
+        schema_name="main",
+        table_name="events",
+        input_bytes=1_000,
+        admitted_bytes=512,
+        max_compacted_files=1,
+    )
+    monkeypatch.setattr(
+        "lakeducktor.cli.select_treatment",
+        lambda _plan, _envelope: SelectionDecision(
+            reason=SelectionReason.SELECTED,
+            envelope=envelope,
+            selected=selected,
+            memory_deferred=2,
+        ),
+    )
+
+    result = main(["--env-file", str(tmp_path / "missing"), "select"])
+
+    assert result == 0
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "resources duckdb_threads=4 duckdb_memory=4GB duckdb_memory_bytes=4000000000"
+    ) in messages
+    assert (
+        "selected treatment=merge priority_rank=1 lake=lake_a table_id=7 "
+        "schema='main' table='events' input_bytes=1000 admitted_bytes=512 "
+        "max_compacted_files=1 memory_deferred=2"
     ) in messages

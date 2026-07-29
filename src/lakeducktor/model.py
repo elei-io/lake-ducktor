@@ -36,6 +36,12 @@ class PriorityState(StrEnum):
     BLOCKED = "blocked"
 
 
+class SelectionReason(StrEnum):
+    SELECTED = "selected"
+    NO_RUNNABLE_TREATMENTS = "no_runnable_treatments"
+    NO_TREATMENT_FITS_MEMORY = "no_treatment_fits_memory"
+
+
 @dataclass(frozen=True, slots=True)
 class DuckDBExtension:
     name: str
@@ -176,6 +182,7 @@ class TableDiagnosis:
     state: DiagnosisState
     reasons: tuple[str, ...]
     target_file_size_bytes: int
+    active_data_bytes: int
     merge_groups: int
     merge_input_files: int
     merge_input_bytes: int
@@ -226,6 +233,7 @@ class DeleteRewritePriority:
     original_rows: int
     deleted_fraction: float
     input_bytes: int
+    table_footprint_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +249,7 @@ class MergePriority:
     input_files: int
     input_bytes: int
     average_input_file_bytes: int
+    target_file_size_bytes: int
     expected_files_eliminated: int
 
 
@@ -262,3 +271,31 @@ class PriorityPlan:
         return sum(
             candidate.state is PriorityState.BLOCKED for candidate in self.merges
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceEnvelope:
+    duckdb_threads: int
+    duckdb_memory: str
+    duckdb_memory_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class TreatmentSelection:
+    kind: TreatmentKind
+    priority_rank: int
+    metadata_schema: str
+    table_id: int
+    schema_name: str
+    table_name: str
+    input_bytes: int
+    admitted_bytes: int
+    max_compacted_files: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionDecision:
+    reason: SelectionReason
+    envelope: ResourceEnvelope
+    selected: TreatmentSelection | None
+    memory_deferred: int

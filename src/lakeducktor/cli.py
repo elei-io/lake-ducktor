@@ -14,6 +14,8 @@ from lakeducktor.diagnosis import DiagnosisError, diagnose_inventory
 from lakeducktor.inventory import InventoryError, inventory_catalog
 from lakeducktor.lake import BackendDetectionError, detect_metadata_backend
 from lakeducktor.priority import PriorityError, prioritize
+from lakeducktor.resources import resource_envelope_from_environment
+from lakeducktor.selection import SelectionError, select_treatment
 
 _LOGGER = logging.getLogger("lakeducktor")
 
@@ -52,6 +54,10 @@ def parser() -> argparse.ArgumentParser:
         "prioritize",
         help="rank current maintenance candidates without executing them",
     )
+    actions.add_parser(
+        "select",
+        help="select one treatment that fits this worker without executing it",
+    )
     return command
 
 
@@ -62,6 +68,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         load_env_file(arguments.env_file)
         configuration = MetadataConfiguration.from_environment()
+        envelope = (
+            resource_envelope_from_environment()
+            if arguments.command == "select"
+            else None
+        )
         detection = detect_metadata_backend(configuration)
         adapter = adapter_for(detection)
     except (CapabilitiesError, ConfigurationError, BackendDetectionError) as error:
@@ -74,7 +85,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "selected adapter=%s",
         type(adapter).__name__,
     )
-    if arguments.command in {"inventory", "diagnose", "prioritize"}:
+    if arguments.command in {"inventory", "diagnose", "prioritize", "select"}:
         try:
             inventory = inventory_catalog(configuration, detection)
         except InventoryError as error:
@@ -98,7 +109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lake.dangling_delete_files,
                 lake.scheduled_files,
             )
-        if arguments.command in {"diagnose", "prioritize"}:
+        if arguments.command in {"diagnose", "prioritize", "select"}:
             try:
                 diagnosis = diagnose_inventory(inventory)
             except DiagnosisError as error:
@@ -140,63 +151,104 @@ def main(argv: Sequence[str] | None = None) -> int:
                         table.rewrite_deleted_rows,
                         table.dangling_delete_files,
                     )
-            if arguments.command == "prioritize":
+            if arguments.command in {"prioritize", "select"}:
                 try:
                     plan = prioritize(diagnosis)
                 except PriorityError as error:
                     _LOGGER.error("priority_failed error=%s", error)
                     return 1
-                for candidate in plan.delete_rewrites:
+                if arguments.command == "prioritize":
+                    for candidate in plan.delete_rewrites:
+                        _LOGGER.info(
+                            "priority kind=delete_rewrite rank=%s lake=%s "
+                            "table_id=%s schema=%r table=%r state=runnable "
+                            "data_files=%s delete_files=%s deleted_rows=%s "
+                            "original_rows=%s deleted_fraction=%.6f "
+                            "input_bytes=%s",
+                            candidate.rank,
+                            candidate.metadata_schema,
+                            candidate.table_id,
+                            candidate.schema_name,
+                            candidate.table_name,
+                            candidate.data_files,
+                            candidate.delete_files,
+                            candidate.deleted_rows,
+                            candidate.original_rows,
+                            candidate.deleted_fraction,
+                            candidate.input_bytes,
+                        )
+                    for candidate in plan.merges:
+                        _LOGGER.info(
+                            "priority kind=merge rank=%s lake=%s table_id=%s "
+                            "schema=%r table=%r state=%s blocked_by=%s "
+                            "groups=%s input_files=%s input_bytes=%s "
+                            "average_input_file_bytes=%s "
+                            "expected_files_eliminated=%s",
+                            candidate.rank,
+                            candidate.metadata_schema,
+                            candidate.table_id,
+                            candidate.schema_name,
+                            candidate.table_name,
+                            candidate.state.value,
+                            candidate.blocked_by.value
+                            if candidate.blocked_by is not None
+                            else "none",
+                            candidate.groups,
+                            candidate.input_files,
+                            candidate.input_bytes,
+                            candidate.average_input_file_bytes,
+                            candidate.expected_files_eliminated,
+                        )
                     _LOGGER.info(
-                        "priority kind=delete_rewrite rank=%s lake=%s "
-                        "table_id=%s schema=%r table=%r state=runnable "
-                        "data_files=%s delete_files=%s deleted_rows=%s "
-                        "original_rows=%s deleted_fraction=%.6f "
-                        "input_bytes=%s",
-                        candidate.rank,
-                        candidate.metadata_schema,
-                        candidate.table_id,
-                        candidate.schema_name,
-                        candidate.table_name,
-                        candidate.data_files,
-                        candidate.delete_files,
-                        candidate.deleted_rows,
-                        candidate.original_rows,
-                        candidate.deleted_fraction,
-                        candidate.input_bytes,
+                        "priority_summary delete_rewrites=%s merges=%s "
+                        "runnable=%s blocked=%s excluded=%s attention=%s",
+                        len(plan.delete_rewrites),
+                        len(plan.merges),
+                        plan.runnable,
+                        plan.blocked,
+                        plan.excluded_tables,
+                        plan.attention_tables,
                     )
-                for candidate in plan.merges:
+                else:
+                    assert envelope is not None
                     _LOGGER.info(
-                        "priority kind=merge rank=%s lake=%s table_id=%s "
-                        "schema=%r table=%r state=%s blocked_by=%s "
-                        "groups=%s input_files=%s input_bytes=%s "
-                        "average_input_file_bytes=%s "
-                        "expected_files_eliminated=%s",
-                        candidate.rank,
-                        candidate.metadata_schema,
-                        candidate.table_id,
-                        candidate.schema_name,
-                        candidate.table_name,
-                        candidate.state.value,
-                        candidate.blocked_by.value
-                        if candidate.blocked_by is not None
-                        else "none",
-                        candidate.groups,
-                        candidate.input_files,
-                        candidate.input_bytes,
-                        candidate.average_input_file_bytes,
-                        candidate.expected_files_eliminated,
+                        "resources duckdb_threads=%s duckdb_memory=%s "
+                        "duckdb_memory_bytes=%s",
+                        envelope.duckdb_threads,
+                        envelope.duckdb_memory,
+                        envelope.duckdb_memory_bytes,
                     )
-                _LOGGER.info(
-                    "priority_summary delete_rewrites=%s merges=%s "
-                    "runnable=%s blocked=%s excluded=%s attention=%s",
-                    len(plan.delete_rewrites),
-                    len(plan.merges),
-                    plan.runnable,
-                    plan.blocked,
-                    plan.excluded_tables,
-                    plan.attention_tables,
-                )
+                    try:
+                        decision = select_treatment(plan, envelope)
+                    except SelectionError as error:
+                        _LOGGER.error("selection_failed error=%s", error)
+                        return 1
+                    selected = decision.selected
+                    if selected is None:
+                        _LOGGER.info(
+                            "selection=none reason=%s memory_deferred=%s",
+                            decision.reason.value,
+                            decision.memory_deferred,
+                        )
+                    else:
+                        _LOGGER.info(
+                            "selected treatment=%s priority_rank=%s lake=%s "
+                            "table_id=%s schema=%r table=%r input_bytes=%s "
+                            "admitted_bytes=%s max_compacted_files=%s "
+                            "memory_deferred=%s",
+                            selected.kind.value,
+                            selected.priority_rank,
+                            selected.metadata_schema,
+                            selected.table_id,
+                            selected.schema_name,
+                            selected.table_name,
+                            selected.input_bytes,
+                            selected.admitted_bytes,
+                            selected.max_compacted_files
+                            if selected.max_compacted_files is not None
+                            else "none",
+                            decision.memory_deferred,
+                        )
     return 0
 
 
