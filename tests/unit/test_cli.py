@@ -44,14 +44,12 @@ def test_entry_point_reports_detected_backend(
     result = main(["--env-file", str(tmp_path / "missing"), "detect-backend"])
 
     assert result == 0
-    assert (
-        capsys.readouterr().out == "DuckLake metadata backend: postgres "
-        "(schema=ducklake, extension=v1)\n"
-    )
+    assert capsys.readouterr().out == ""
     messages = [record.getMessage() for record in caplog.records]
     assert f"starting version={__version__}" in messages
     assert "detected metadata_backend=postgres" in messages
     assert "detected schema=ducklake" in messages
+    assert "selected adapter=PostgresCapabilitiesAdapter" in messages
     assert "detected extension=core_functions version=v1" in messages
     assert "detected extension=ducklake version=abc123" in messages
 
@@ -80,10 +78,7 @@ def test_entry_point_summarizes_multiple_lakes(
     result = main(["--env-file", str(tmp_path / "missing"), "detect-backend"])
 
     assert result == 0
-    assert (
-        capsys.readouterr().out
-        == "DuckLake metadata backend: postgres (schemas=2, extension=v1)\n"
-    )
+    assert capsys.readouterr().out == ""
     messages = [record.getMessage() for record in caplog.records]
     assert "detected metadata_backend=postgres" in messages
     assert "detected schemas=2" in messages

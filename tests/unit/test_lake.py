@@ -1,4 +1,5 @@
-import duckdb
+from unittest.mock import Mock
+
 import pytest
 
 from lakeducktor.lake import (
@@ -36,12 +37,17 @@ def test_missing_metadata_schema_is_rejected() -> None:
 
 
 def test_loaded_duckdb_extensions_are_detected() -> None:
-    connection = duckdb.connect(":memory:")
-    try:
-        extensions = _loaded_duckdb_extensions(connection)
-    finally:
-        connection.close()
+    connection = Mock()
+    connection.execute.return_value.fetchall.return_value = [
+        ("core_functions", "v1", "STATICALLY_LINKED", ""),
+        ("ducklake", "abc123", "REPOSITORY", "core"),
+    ]
 
-    names = {extension.name for extension in extensions}
-    assert "core_functions" in names
-    assert all(extension.version for extension in extensions)
+    extensions = _loaded_duckdb_extensions(connection)
+
+    assert [(extension.name, extension.version) for extension in extensions] == [
+        ("core_functions", "v1"),
+        ("ducklake", "abc123"),
+    ]
+    assert extensions[0].source == "built-in"
+    connection.execute.assert_called_once()

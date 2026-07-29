@@ -12,6 +12,12 @@ class MetadataBackend(StrEnum):
     SQLITE = "sqlite"
 
 
+class CoordinationStrategy(StrEnum):
+    DUCKDB = "duckdb"
+    POSTGRES = "postgres"
+    SQLITE = "sqlite"
+
+
 @dataclass(frozen=True, slots=True)
 class DuckDBExtension:
     name: str
@@ -26,3 +32,11 @@ class BackendDetection:
     metadata_schemas: tuple[str, ...]
     extension_version: str
     duckdb_extensions: tuple[DuckDBExtension, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class BackendCapabilities:
+    metadata_backend: MetadataBackend
+    coordination: CoordinationStrategy
+    horizontal_scale_safe: bool
+    coordination_extra: str | None

@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from lakeducktor import __version__
+from lakeducktor.capabilities import CapabilitiesError, adapter_for
 from lakeducktor.config import ConfigurationError, MetadataConfiguration, load_env_file
 from lakeducktor.lake import BackendDetectionError, detect_metadata_backend
 
@@ -48,7 +49,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         load_env_file(arguments.env_file)
         configuration = MetadataConfiguration.from_environment()
         detection = detect_metadata_backend(configuration)
-    except (ConfigurationError, BackendDetectionError) as error:
+        adapter = adapter_for(detection)
+    except (CapabilitiesError, ConfigurationError, BackendDetectionError) as error:
         print(f"LakeDucktor: {error}", file=sys.stderr)
         return 1
 
@@ -58,17 +60,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         scope = f"schemas={len(detection.metadata_schemas)}"
     _LOGGER.info("detected metadata_backend=%s", detection.backend.value)
     _LOGGER.info("detected %s", scope)
+    _LOGGER.info(
+        "selected adapter=%s",
+        type(adapter).__name__,
+    )
     for extension in detection.duckdb_extensions:
         _LOGGER.info(
             "detected extension=%s version=%s",
             extension.name,
             extension.version,
         )
-    print(
-        "DuckLake metadata backend: "
-        f"{detection.backend.value} "
-        f"({scope}, extension={detection.extension_version})"
-    )
     return 0
 
 
