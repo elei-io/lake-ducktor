@@ -20,6 +20,7 @@ class SelectionError(RuntimeError):
 
 
 _MINIMUM_BYTES_PER_THREAD = 125_000_000
+_MAXIMUM_MERGE_INPUT_FILES = 512
 _UNSORTED_HEADROOM_DIVISOR = 4
 _SORTED_HEADROOM_DIVISOR = 2
 
@@ -72,6 +73,7 @@ def _rewrite_selection(
         memory_headroom_bytes=headroom,
         usable_memory_bytes=usable_memory,
         max_compacted_files=None,
+        input_files=candidate.data_files,
     )
 
 
@@ -92,10 +94,38 @@ def _merge_selection(
         envelope,
         candidate.sorting_enabled,
     )
-    output_capacity = usable_memory // candidate.target_file_size_bytes
-    if output_capacity == 0:
+    minimum_input_file_bytes = (
+        candidate.minimum_input_file_bytes
+        if candidate.minimum_input_file_bytes > 0
+        else candidate.average_input_file_bytes
+    )
+    if minimum_input_file_bytes <= 0:
+        raise SelectionError(
+            f"merge has an invalid minimum file size for table_id={candidate.table_id}"
+        )
+    execution_target_file_size_bytes = min(
+        candidate.target_file_size_bytes,
+        usable_memory,
+        minimum_input_file_bytes * _MAXIMUM_MERGE_INPUT_FILES,
+    )
+    if execution_target_file_size_bytes == 0:
         return None
-    max_compacted_files = min(expected_output_files, output_capacity)
+    estimated_inputs_per_group = (
+        execution_target_file_size_bytes + minimum_input_file_bytes - 1
+    ) // minimum_input_file_bytes
+    groups_by_input_count = max(
+        1,
+        _MAXIMUM_MERGE_INPUT_FILES // estimated_inputs_per_group,
+    )
+    groups_by_memory = max(
+        1,
+        usable_memory // execution_target_file_size_bytes,
+    )
+    maximum_output_groups = min(
+        expected_output_files,
+        groups_by_input_count,
+        groups_by_memory,
+    )
     return TreatmentSelection(
         kind=TreatmentKind.MERGE,
         priority_rank=candidate.rank,
@@ -104,11 +134,14 @@ def _merge_selection(
         schema_name=candidate.schema_name,
         table_name=candidate.table_name,
         input_bytes=candidate.input_bytes,
-        admitted_bytes=max_compacted_files * candidate.target_file_size_bytes,
+        admitted_bytes=execution_target_file_size_bytes * maximum_output_groups,
         sorting_enabled=candidate.sorting_enabled,
         memory_headroom_bytes=headroom,
         usable_memory_bytes=usable_memory,
-        max_compacted_files=max_compacted_files,
+        max_compacted_files=maximum_output_groups,
+        input_files=candidate.input_files,
+        lake_target_file_size_bytes=candidate.target_file_size_bytes,
+        execution_target_file_size_bytes=execution_target_file_size_bytes,
     )
 
 

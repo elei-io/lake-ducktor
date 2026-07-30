@@ -7,7 +7,7 @@ from lakeducktor.config import (
 )
 from lakeducktor.daemon import MaintenanceError, maintain_once, run_loop
 from lakeducktor.diagnosis import diagnose_inventory
-from lakeducktor.executor import ExecutionError
+from lakeducktor.executor import ExecutionError, ExecutionFailureReason
 from lakeducktor.model import (
     BackendDetection,
     CatalogInventory,
@@ -121,14 +121,14 @@ class FakeClaim:
 
 
 class FakeCoordinator:
-    def __init__(self, busy: set[int] | None = None) -> None:
+    def __init__(self, busy: set[str] | None = None) -> None:
         self.busy = busy or set()
-        self.attempts: list[int] = []
+        self.attempts: list[str] = []
         self.claims: list[FakeClaim] = []
 
-    def try_claim(self, _metadata_schema: str, table_id: int) -> FakeClaim | None:
-        self.attempts.append(table_id)
-        if table_id in self.busy:
+    def try_claim(self, metadata_schema: str) -> FakeClaim | None:
+        self.attempts.append(metadata_schema)
+        if metadata_schema in self.busy:
             return None
         claim = FakeClaim()
         self.claims.append(claim)
@@ -194,6 +194,32 @@ class RecordingObserver:
             )
         )
 
+    def treatment_progress_observed(
+        self,
+        selection,
+        files_before,
+        files_after,
+        snapshot_before,
+        snapshot_after,
+    ) -> None:
+        self.events.append(
+            (
+                "treatment_progress_observed",
+                selection.table_id,
+                files_before,
+                files_after,
+                snapshot_before,
+                snapshot_after,
+            )
+        )
+
+    def retry_scheduled(
+        self,
+        reason: ExecutionFailureReason,
+        duration_seconds: float,
+    ) -> None:
+        self.events.append(("retry_scheduled", reason, duration_seconds))
+
 
 class RecordingStopEvent:
     def __init__(self) -> None:
@@ -210,6 +236,18 @@ class RecordingStopEvent:
         self.waits.append(timeout)
         self.set()
         return True
+
+
+class CountingStopEvent(RecordingStopEvent):
+    def __init__(self, waits_before_stop: int) -> None:
+        super().__init__()
+        self.waits_before_stop = waits_before_stop
+
+    def wait(self, timeout: float) -> bool:
+        self.waits.append(timeout)
+        if len(self.waits) >= self.waits_before_stop:
+            self.set()
+        return self.is_set()
 
 
 def no_treatment_outcome() -> MaintenanceOutcome:
@@ -238,16 +276,13 @@ def stale_outcome() -> MaintenanceOutcome:
     )
 
 
-def test_busy_top_candidate_does_not_idle_the_worker() -> None:
+def test_busy_lake_skips_other_tables_in_the_same_lake() -> None:
     initial = catalog(
         table(1, files=6, file_bytes=120), table(2, files=4, file_bytes=80)
     )
     initial_plan = prioritize(diagnose_inventory(initial))
-    inventory = InventorySequence(
-        catalog(table(2, files=4, file_bytes=80)),
-        catalog(table(2)),
-    )
-    coordinator = FakeCoordinator(busy={1})
+    inventory = InventorySequence()
+    coordinator = FakeCoordinator(busy={"lake"})
     executed = []
 
     outcome = maintain_once(
@@ -263,16 +298,13 @@ def test_busy_top_candidate_does_not_idle_the_worker() -> None:
         ),
     )
 
-    assert coordinator.attempts == [1, 2]
-    assert outcome.state is MaintenanceState.COMPLETED
-    assert outcome.selection is not None
-    assert outcome.selection.table_id == 2
+    assert coordinator.attempts == ["lake"]
+    assert outcome.state is MaintenanceState.NO_TREATMENT
+    assert outcome.selection is None
     assert outcome.claim_contention == 1
-    assert outcome.table_present is True
-    assert outcome.still_actionable is False
-    assert executed[0].table_id == 2
-    assert coordinator.claims[0].released is True
-    assert inventory.schemas == [("lake",), ("lake",)]
+    assert executed == []
+    assert coordinator.claims == []
+    assert inventory.schemas == []
 
 
 def test_stale_treatment_is_not_executed() -> None:
@@ -316,6 +348,43 @@ def test_failed_treatment_releases_claim() -> None:
         )
 
     assert coordinator.claims[0].released is True
+
+
+def test_failed_treatment_reports_post_failure_progress() -> None:
+    initial = catalog(table(1, files=4, file_bytes=80))
+    observer = RecordingObserver()
+
+    def fail(*_arguments) -> TreatmentResult:
+        raise ExecutionError(
+            "native conflict",
+            reason=ExecutionFailureReason.CONCURRENT_COMPACTION,
+        )
+
+    with pytest.raises(MaintenanceError) as error:
+        maintain_once(
+            _METADATA,
+            _STORAGE,
+            _DETECTION,
+            _ENVELOPE,
+            prioritize(diagnose_inventory(initial)),
+            FakeCoordinator(),
+            inventory=InventorySequence(
+                initial,
+                catalog(table(1, files=2, file_bytes=40)),
+            ),
+            execute=fail,
+            observer=observer,
+        )
+
+    assert error.value.reason is ExecutionFailureReason.CONCURRENT_COMPACTION
+    assert (
+        "treatment_progress_observed",
+        1,
+        4,
+        2,
+        1,
+        1,
+    ) in observer.events
 
 
 def test_treatment_observer_brackets_only_native_execution() -> None:
@@ -388,6 +457,43 @@ def test_run_loop_retries_failures_after_the_same_interruptible_wait() -> None:
         "cycle_failed",
         ("idle", 7),
         "stopped",
+    ]
+
+
+def test_transient_conflicts_use_bounded_exponential_backoff() -> None:
+    stop_event = CountingStopEvent(3)
+    observer = RecordingObserver()
+    configuration = RunConfiguration(
+        7,
+        60,
+        "127.0.0.1",
+        8_000,
+        conflict_backoff_base_seconds=5,
+        conflict_backoff_max_seconds=12,
+    )
+
+    def fail() -> MaintenanceOutcome:
+        raise MaintenanceError(
+            "compaction conflict",
+            reason=ExecutionFailureReason.CONCURRENT_COMPACTION,
+        )
+
+    run_loop(
+        fail,
+        configuration,
+        observer,
+        stop_event,  # type: ignore[arg-type]
+    )
+
+    assert stop_event.waits == [5, 10, 12]
+    assert [
+        event
+        for event in observer.events
+        if isinstance(event, tuple) and event[0] == "retry_scheduled"
+    ] == [
+        ("retry_scheduled", ExecutionFailureReason.CONCURRENT_COMPACTION, 5),
+        ("retry_scheduled", ExecutionFailureReason.CONCURRENT_COMPACTION, 10),
+        ("retry_scheduled", ExecutionFailureReason.CONCURRENT_COMPACTION, 12),
     ]
 
 

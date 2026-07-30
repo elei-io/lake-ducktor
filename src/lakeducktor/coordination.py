@@ -36,18 +36,17 @@ class TreatmentCoordinator(Protocol):
     def try_claim(
         self,
         metadata_schema: str,
-        table_id: int,
     ) -> TreatmentClaim | None:
-        """Return recoverable ownership, or None when another worker owns it."""
+        """Return recoverable lake ownership, or None when another worker owns it."""
 
 
 type ConnectionFactory = Callable[[MetadataConfiguration], _Connection]
 
 
-def advisory_lock_key(metadata_schema: str, table_id: int) -> int:
-    """Return a stable signed PostgreSQL advisory-lock key for one table."""
+def advisory_lock_key(metadata_schema: str) -> int:
+    """Return a stable signed PostgreSQL advisory-lock key for one lake."""
 
-    identity = f"lakeducktor\0{metadata_schema}\0{table_id}".encode()
+    identity = f"lakeducktor\0{metadata_schema}".encode()
     return int.from_bytes(blake2b(identity, digest_size=8).digest(), signed=True)
 
 
@@ -117,9 +116,8 @@ class PostgresTreatmentCoordinator:
     def try_claim(
         self,
         metadata_schema: str,
-        table_id: int,
     ) -> PostgresTreatmentClaim | None:
-        lock_key = advisory_lock_key(metadata_schema, table_id)
+        lock_key = advisory_lock_key(metadata_schema)
         connection: _Connection | None = None
         try:
             connection = self._connect(self._configuration)

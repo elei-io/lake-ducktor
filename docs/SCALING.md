@@ -6,10 +6,11 @@ recoverable claims, preventing the same maintenance scope from being treated
 concurrently. Workers hold no authoritative local state, so replicas may be
 added, removed, restarted, or briefly overlapped.
 
-Horizontal scaling increases the number of independent tables or lakes that can
-be treated concurrently. Vertical scaling gives each treatment more CPU and
-memory. A single large maintenance operation may benefit more from a larger
-worker than from additional replicas.
+Horizontal scaling increases the number of independent lakes that can be
+treated concurrently. Treatments within one lake are serialized because
+DuckLake metadata commits share its snapshot sequence. Vertical scaling gives
+each treatment more CPU and memory. A single busy lake benefits from an
+appropriately sized worker, not additional replicas competing for its claim.
 
 ## Scaling signals
 

@@ -160,6 +160,7 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
                 activity_penalty=float(activity_penalty),
                 adjusted_expected_files_eliminated=float(adjusted_eliminations),
                 sorting_enabled=table.sorting_enabled,
+                minimum_input_file_bytes=(table.minimum_merge_candidate_file_bytes),
             )
         )
     merges = tuple(merge_priorities)

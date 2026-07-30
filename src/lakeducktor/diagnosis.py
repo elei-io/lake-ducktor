@@ -88,6 +88,7 @@ def diagnose_table(table: TableInventory) -> TableDiagnosis:
         rewrite_deleted_rows=table.rewrite_deleted_rows,
         rewrite_original_rows=table.rewrite_original_rows,
         dangling_delete_files=table.dangling_delete_files,
+        minimum_merge_candidate_file_bytes=table.data_file_sizes.minimum_bytes,
     )
 
 

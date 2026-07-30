@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Lock, Thread
 from time import monotonic, time
 from typing import Protocol
@@ -19,6 +19,7 @@ from prometheus_client import (
     generate_latest,
 )
 
+from lakeducktor.executor import ExecutionFailureReason
 from lakeducktor.model import (
     CatalogDiagnosis,
     CatalogInventory,
@@ -136,6 +137,30 @@ class WorkerTelemetry:
             "lakeducktor_treatment_duration_seconds",
             "Native treatment duration.",
             ("kind", "outcome"),
+            registry=self.registry,
+        )
+        self._treatment_conflicts = Counter(
+            "lakeducktor_treatment_conflicts_total",
+            "Native treatment conflicts by classified reason.",
+            ("reason",),
+            registry=self.registry,
+        )
+        self._treatment_retries = Counter(
+            "lakeducktor_treatment_retries_total",
+            "Retries scheduled after transient treatment failures.",
+            ("reason",),
+            registry=self.registry,
+        )
+        self._treatment_backoff = Histogram(
+            "lakeducktor_treatment_retry_backoff_seconds",
+            "Backoff scheduled before retrying a transient treatment failure.",
+            ("reason",),
+            registry=self.registry,
+        )
+        self._partial_progress = Counter(
+            "lakeducktor_treatment_partial_progress_files_total",
+            "Input files eliminated despite a failed native treatment.",
+            ("kind",),
             registry=self.registry,
         )
         self._files_processed = Counter(
@@ -301,6 +326,17 @@ class WorkerTelemetry:
             kind=selection.kind.value,
             outcome=outcome,
         ).observe(duration_seconds)
+        if error is not None:
+            reason = getattr(
+                error,
+                "reason",
+                ExecutionFailureReason.UNKNOWN,
+            )
+            if reason in {
+                ExecutionFailureReason.CONCURRENT_COMPACTION,
+                ExecutionFailureReason.SNAPSHOT_RETRY_EXHAUSTED,
+            }:
+                self._treatment_conflicts.labels(reason=reason.value).inc()
         if result is not None:
             self._files_processed.labels(kind=selection.kind.value).inc(
                 result.files_processed
@@ -315,6 +351,27 @@ class WorkerTelemetry:
             self._phase = WorkerPhase.CYCLING
             self._phase_started = self._clock()
             self._selection = None
+
+    def treatment_progress_observed(
+        self,
+        selection: TreatmentSelection,
+        files_before: int,
+        files_after: int,
+        snapshot_before: int | None,
+        snapshot_after: int | None,
+    ) -> None:
+        del snapshot_before, snapshot_after
+        self._partial_progress.labels(kind=selection.kind.value).inc(
+            max(0, files_before - files_after)
+        )
+
+    def retry_scheduled(
+        self,
+        reason: ExecutionFailureReason,
+        duration_seconds: float,
+    ) -> None:
+        self._treatment_retries.labels(reason=reason.value).inc()
+        self._treatment_backoff.labels(reason=reason.value).observe(duration_seconds)
 
     def cycle_completed(self, outcome: MaintenanceOutcome) -> None:
         self._cycles.labels(outcome=outcome.state.value).inc()
@@ -492,8 +549,9 @@ def _handler(
     return TelemetryHandler
 
 
-class _TelemetryHTTPServer(HTTPServer):
+class _TelemetryHTTPServer(ThreadingHTTPServer):
     request_queue_size = 128
+    daemon_threads = True
 
 
 class TelemetryServer:

@@ -12,9 +12,15 @@ native DuckLake operation. Useful work drains immediately. No work, contention,
 resource deferral, native no-progress, and failures wait
 `POLL_INTERVAL_SECONDS` before retrying.
 
-A pod performs one treatment at a time. DuckDB connections stay local to the
-main worker thread and are never shared with the health server, watchdog, or
-another treatment.
+A pod performs one treatment at a time. Each treatment runs in an isolated
+child process and creates its own DuckDB connection. Connections are never
+shared with the parent loop, health server, watchdog, or another treatment.
+
+Classified concurrent-compaction and snapshot-commit conflicts are retried with
+exponential backoff bounded by `CONFLICT_BACKOFF_BASE_SECONDS` and
+`CONFLICT_BACKOFF_MAX_SECONDS`. After any failed native call, LakeDucktor
+re-inventories under the still-held claim and reports observed committed
+progress before deciding the next cycle.
 
 ## Health
 
@@ -31,8 +37,10 @@ not repeatedly kill potentially useful work; alert on failed readiness and the
 stuck metrics.
 
 On `SIGTERM` or `SIGINT`, the worker becomes unready, admits no new treatment,
-finishes the current native operation, releases its claim, and exits. Set the
-pod termination grace period long enough for expected treatments.
+terminates an active isolated treatment, re-inventories any committed progress,
+releases its claim, and exits. A hard process or pod kill is also recoverable
+for PostgreSQL-backed lakes because PostgreSQL releases the session advisory
+lock when the connection disappears.
 
 Example probes:
 

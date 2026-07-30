@@ -24,7 +24,12 @@ from lakeducktor.coordination import (
     TreatmentCoordinator,
 )
 from lakeducktor.diagnosis import DiagnosisError, diagnose_inventory
-from lakeducktor.executor import ExecutionError, execute_treatment
+from lakeducktor.executor import (
+    ExecutionError,
+    ExecutionFailureReason,
+    IsolatedTreatmentExecutor,
+    execute_treatment,
+)
 from lakeducktor.inventory import InventoryError, inventory_catalog
 from lakeducktor.lake import BackendDetectionError, detect_metadata_backend
 from lakeducktor.model import (
@@ -79,6 +84,24 @@ type CycleFunction = Callable[[], MaintenanceOutcome]
 class MaintenanceError(RuntimeError):
     """A one-shot maintenance attempt failed."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: ExecutionFailureReason | None = None,
+        selection: TreatmentSelection | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.selection = selection
+
+    @property
+    def transient(self) -> bool:
+        return self.reason in {
+            ExecutionFailureReason.CONCURRENT_COMPACTION,
+            ExecutionFailureReason.SNAPSHOT_RETRY_EXHAUSTED,
+        }
+
 
 class RunError(RuntimeError):
     """The long-lived worker could not be started."""
@@ -103,6 +126,15 @@ class MaintenanceObserver(Protocol):
         duration_seconds: float,
     ) -> None: ...
 
+    def treatment_progress_observed(
+        self,
+        selection: TreatmentSelection,
+        files_before: int,
+        files_after: int,
+        snapshot_before: int | None,
+        snapshot_after: int | None,
+    ) -> None: ...
+
 
 class RunLoopObserver(MaintenanceObserver, Protocol):
     def cycle_started(self) -> None: ...
@@ -117,6 +149,12 @@ class RunLoopObserver(MaintenanceObserver, Protocol):
 
     def stopped(self) -> None: ...
 
+    def retry_scheduled(
+        self,
+        reason: ExecutionFailureReason,
+        duration_seconds: float,
+    ) -> None: ...
+
 
 def _fresh_state(
     configuration: MetadataConfiguration,
@@ -127,7 +165,36 @@ def _fresh_state(
     lake_detection = replace(detection, metadata_schemas=(metadata_schema,))
     fresh_inventory = inventory(configuration, lake_detection)
     diagnosis = diagnose_inventory(fresh_inventory)
-    return diagnosis, prioritize(diagnosis)
+    return fresh_inventory, diagnosis, prioritize(diagnosis)
+
+
+def _selected_table_input_files(
+    inventory: CatalogInventory,
+    selection: TreatmentSelection,
+) -> int | None:
+    for lake in inventory.lakes:
+        for table in lake.tables:
+            if (
+                table.metadata_schema == selection.metadata_schema
+                and table.table_id == selection.table_id
+            ):
+                if selection.kind is TreatmentKind.DELETE_REWRITE:
+                    return table.rewrite_data_files
+                return sum(
+                    group.merge_candidate_files
+                    for group in table.compatible_file_groups
+                )
+    return None
+
+
+def _lake_snapshot(
+    inventory: CatalogInventory,
+    metadata_schema: str,
+) -> int | None:
+    for lake in inventory.lakes:
+        if lake.metadata_schema == metadata_schema:
+            return lake.latest_snapshot_id
+    return None
 
 
 def _still_actionable(
@@ -202,12 +269,18 @@ def maintain_once(
                 )
             claim = coordinator.try_claim(
                 selection.metadata_schema,
-                selection.table_id,
             )
             if claim is not None:
                 break
             claim_contention += 1
-            unavailable.add((selection.metadata_schema, selection.table_id))
+            unavailable.update(
+                (candidate.metadata_schema, candidate.table_id)
+                for candidate in (
+                    *initial_plan.delete_rewrites,
+                    *initial_plan.merges,
+                )
+                if candidate.metadata_schema == selection.metadata_schema
+            )
             _LOGGER.info(
                 "claim_busy kind=%s lake=%s table_id=%s",
                 selection.kind.value,
@@ -222,7 +295,7 @@ def maintain_once(
             selection.table_id,
         )
         try:
-            _, fresh_plan = _fresh_state(
+            fresh_inventory, _, fresh_plan = _fresh_state(
                 configuration,
                 detection,
                 selection.metadata_schema,
@@ -244,7 +317,9 @@ def maintain_once(
                 selection = revalidated
                 _LOGGER.info(
                     "treatment_started kind=%s lake=%s table_id=%s "
-                    "schema=%r table=%r input_bytes=%s admitted_bytes=%s "
+                    "schema=%r table=%r input_files=%s input_bytes=%s "
+                    "lake_target_bytes=%s execution_target_bytes=%s "
+                    "admitted_bytes=%s "
                     "sorting_enabled=%s memory_headroom_bytes=%s "
                     "usable_memory_bytes=%s max_compacted_files=%s",
                     selection.kind.value,
@@ -252,7 +327,14 @@ def maintain_once(
                     selection.table_id,
                     selection.schema_name,
                     selection.table_name,
+                    selection.input_files,
                     selection.input_bytes,
+                    selection.lake_target_file_size_bytes
+                    if selection.lake_target_file_size_bytes is not None
+                    else "none",
+                    selection.execution_target_file_size_bytes
+                    if selection.execution_target_file_size_bytes is not None
+                    else "none",
                     selection.admitted_bytes,
                     str(selection.sorting_enabled).lower(),
                     selection.memory_headroom_bytes,
@@ -273,6 +355,56 @@ def maintain_once(
                     )
                 except Exception as error:
                     duration_seconds = monotonic() - started
+                    try:
+                        lake_detection = replace(
+                            detection,
+                            metadata_schemas=(selection.metadata_schema,),
+                        )
+                        after_inventory = inventory(configuration, lake_detection)
+                        files_after = _selected_table_input_files(
+                            after_inventory,
+                            selection,
+                        )
+                        snapshot_before = _lake_snapshot(
+                            fresh_inventory,
+                            selection.metadata_schema,
+                        )
+                        snapshot_after = _lake_snapshot(
+                            after_inventory,
+                            selection.metadata_schema,
+                        )
+                        if files_after is not None:
+                            if observer is not None:
+                                observer.treatment_progress_observed(
+                                    selection,
+                                    selection.input_files,
+                                    files_after,
+                                    snapshot_before,
+                                    snapshot_after,
+                                )
+                            _LOGGER.info(
+                                "treatment_failed_progress kind=%s lake=%s "
+                                "table_id=%s input_files_before=%s "
+                                "input_files_after=%s files_eliminated=%s "
+                                "snapshot_before=%s snapshot_after=%s",
+                                selection.kind.value,
+                                selection.metadata_schema,
+                                selection.table_id,
+                                selection.input_files,
+                                files_after,
+                                max(0, selection.input_files - files_after),
+                                snapshot_before,
+                                snapshot_after,
+                            )
+                    except Exception as progress_error:
+                        _LOGGER.warning(
+                            "treatment_failed_progress_unavailable kind=%s "
+                            "lake=%s table_id=%s error=%s",
+                            selection.kind.value,
+                            selection.metadata_schema,
+                            selection.table_id,
+                            progress_error,
+                        )
                     if observer is not None:
                         observer.treatment_finished(
                             selection,
@@ -308,7 +440,7 @@ def maintain_once(
                     result.files_created,
                     duration_seconds,
                 )
-                verification, _ = _fresh_state(
+                _, verification, _ = _fresh_state(
                     configuration,
                     detection,
                     selection.metadata_schema,
@@ -340,10 +472,15 @@ def maintain_once(
             raise
         _release_claim(claim, selection)
         return outcome
+    except ExecutionError as error:
+        raise MaintenanceError(
+            str(error),
+            reason=error.reason,
+            selection=selection,
+        ) from error
     except (
         CoordinationError,
         DiagnosisError,
-        ExecutionError,
         InventoryError,
         PriorityError,
         SelectionError,
@@ -427,21 +564,44 @@ def run_loop(
 ) -> None:
     """Drain useful work immediately and wait interruptibly when idle."""
 
+    consecutive_conflicts = 0
     try:
         while not stop_event.is_set():
             observer.cycle_started()
             should_wait = False
+            wait_seconds = configuration.poll_interval_seconds
             try:
                 outcome = cycle()
+            except MaintenanceError as error:
+                observer.cycle_failed()
+                should_wait = True
+                if error.transient and error.reason is not None:
+                    consecutive_conflicts += 1
+                    wait_seconds = min(
+                        configuration.conflict_backoff_max_seconds,
+                        configuration.conflict_backoff_base_seconds
+                        * (2 ** (consecutive_conflicts - 1)),
+                    )
+                    observer.retry_scheduled(error.reason, wait_seconds)
+                else:
+                    consecutive_conflicts = 0
+                _LOGGER.exception(
+                    "cycle_failed error=%s reason=%s retry_seconds=%.3f",
+                    error,
+                    error.reason.value if error.reason is not None else "unknown",
+                    wait_seconds,
+                )
             except Exception as error:
+                consecutive_conflicts = 0
                 observer.cycle_failed()
                 should_wait = True
                 _LOGGER.exception(
-                    "cycle_failed error=%s retry_seconds=%.3f",
+                    "cycle_failed error=%s reason=unknown retry_seconds=%.3f",
                     error,
-                    configuration.poll_interval_seconds,
+                    wait_seconds,
                 )
             else:
+                consecutive_conflicts = 0
                 observer.cycle_completed(outcome)
                 if outcome.state is MaintenanceState.NO_TREATMENT:
                     should_wait = True
@@ -467,8 +627,8 @@ def run_loop(
             if stop_event.is_set():
                 break
             if should_wait:
-                observer.idle(configuration.poll_interval_seconds)
-                stop_event.wait(configuration.poll_interval_seconds)
+                observer.idle(wait_seconds)
+                stop_event.wait(wait_seconds)
     finally:
         observer.stopped()
 
@@ -518,6 +678,7 @@ def run_service(
     except TelemetryError as error:
         raise RunError(str(error)) from error
     stop_event = Event()
+    execute_isolated = IsolatedTreatmentExecutor(stop_event)
     restore_signals = _install_signal_handlers(stop_event, telemetry)
     try:
         server.start()
@@ -536,6 +697,7 @@ def run_service(
                 storage,
                 envelope,
                 observer=telemetry,
+                execute=execute_isolated,
             ),
             configuration,
             telemetry,

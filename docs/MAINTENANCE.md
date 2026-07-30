@@ -240,19 +240,23 @@ alter treatment priority.
 ### Treat one selection
 
 `lakeducktor maintain` performs at most one native treatment. PostgreSQL-backed
-lakes use a non-blocking session advisory lock scoped to the metadata schema
-and stable table ID. A busy table is skipped so another fitting table can use
-the worker. The dedicated PostgreSQL session holds ownership for the duration
-of treatment; explicit release happens in all normal and failure paths, while
-connection loss releases the lock after worker death.
+lakes use a non-blocking session advisory lock scoped to the metadata schema.
+DuckLake metadata commits share one snapshot sequence across a lake, so only
+one LakeDucktor treatment may commit to a lake at a time; independent lakes can
+still be treated concurrently. The dedicated PostgreSQL session holds
+ownership for the duration of treatment. Explicit release happens in all
+normal and failure paths, while connection loss releases the lock after worker
+death.
 
 After claiming, LakeDucktor inventories and diagnoses that lake again. It
 abandons work that was removed, healed, excluded, or no longer fits, and
 refreshes renamed tables by stable ID. It then opens a fresh writable DuckDB
 context with the configured memory and threads:
 
-- merges call DuckLake's table-scoped `merge_adjacent_files` with the selected
-  `max_compacted_files` bound;
+- merges call DuckLake's table-scoped `merge_adjacent_files` with a
+  session-only execution target and output-group count selected to keep the
+  estimated treatment at no more than 512 input files and within usable
+  memory;
 - delete rewrites call DuckLake's table-scoped `rewrite_data_files` without
   overriding the lake's effective threshold.
 
@@ -261,16 +265,19 @@ storage changes. LakeDucktor records the returned processed/created file
 counts, diagnoses the table once more, and releases the claim. A successful
 bounded treatment may remain actionable for the next invocation.
 
-Merge treatment is incremental but not tiered: it uses the lake's effective
-`target_file_size` directly and never changes that setting to create
-LakeDucktor-owned size classes. Tiering requires explicit lake policy or a
-native per-call output target.
+Merge treatment is incremental. LakeDucktor never mutates the lake's persisted
+`target_file_size`; when the smallest eligible inputs would make one native
+call too broad, it lowers DuckDB's target for that treatment session only. The
+temporary target is capped by the lake target and available memory. This
+creates bounded intermediate groups that remain eligible for later passes
+until the lake's own target is reached.
 
-Long treatments emit start and completion or failure events. Running state,
-start time, elapsed time, and outcomes are meaningful operational signals;
-DuckLake does not expose a reliable percentage complete, so LakeDucktor does
-not manufacture one. PostgreSQL session ownership needs no application
-heartbeat.
+Long treatments run in an isolated child process with its own DuckDB
+connection. They emit start and completion or classified failure events.
+Running state, start time, elapsed time, and outcomes are meaningful
+operational signals; DuckLake does not expose a reliable percentage complete,
+so LakeDucktor does not manufacture one. PostgreSQL session ownership needs no
+application heartbeat.
 
 PostgreSQL coordination uses the optional dependency:
 
@@ -283,14 +290,14 @@ uv run lakeducktor maintain
 
 ### Understand what a native bound really bounds
 
-DuckLake's merge limit bounded output compaction groups, not input files. In a
-partitioned test, one bounded call produced 32 output groups while consuming 64
-input files. Consequently:
+DuckLake's merge limit bounds output compaction groups, not input files.
+LakeDucktor therefore estimates inputs per group from the smallest eligible
+file, derives a session-only target, and admits as many groups as fit both the
+512-input guard and usable memory. Consequently:
 
-- input count is not a reliable memory bound;
-- the likely output working set matters;
-- larger target files require narrower batches;
-- a productive pass may need several calls to drain the same table.
+- the guard is an estimate from inventory, not a native hard input limit;
+- the likely output working set and sorting headroom still matter;
+- a productive pass normally needs several calls to drain the same table.
 
 DuckBasin eventually sized a maintenance execution context from the largest
 possible bounded output batch rather than from the apparent file-count limit.

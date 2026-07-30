@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from time import sleep
 from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import urlopen
@@ -6,6 +7,7 @@ from urllib.request import urlopen
 import pytest
 from prometheus_client import generate_latest
 
+from lakeducktor.executor import ExecutionError, ExecutionFailureReason
 from lakeducktor.model import (
     MaintenanceOutcome,
     MaintenanceState,
@@ -152,6 +154,34 @@ def test_treatment_progress_and_claim_contention_are_counted() -> None:
     assert "lakeducktor_claim_contention_total 3.0" in metrics
 
 
+def test_conflict_retry_and_partial_progress_are_counted() -> None:
+    worker = telemetry(FakeClock())
+    chosen = selection()
+    error = ExecutionError(
+        "conflict",
+        reason=ExecutionFailureReason.CONCURRENT_COMPACTION,
+    )
+    worker.treatment_started(chosen)
+    worker.treatment_progress_observed(chosen, 512, 128, 10, 11)
+    worker.treatment_finished(chosen, None, error, 4)
+    worker.retry_scheduled(ExecutionFailureReason.CONCURRENT_COMPACTION, 5)
+
+    metrics = generate_latest(worker.registry).decode()
+
+    assert (
+        'lakeducktor_treatment_conflicts_total{reason="concurrent_compaction"} 1.0'
+        in metrics
+    )
+    assert (
+        'lakeducktor_treatment_retries_total{reason="concurrent_compaction"} 1.0'
+        in metrics
+    )
+    assert (
+        'lakeducktor_treatment_partial_progress_files_total{kind="merge"} 384.0'
+        in metrics
+    )
+
+
 def test_recent_insertion_files_are_exposed_as_an_aggregate_metric() -> None:
     worker = telemetry(FakeClock())
     tables = (
@@ -239,3 +269,38 @@ def test_http_server_queues_concurrent_probe_and_scrape_bursts() -> None:
         server.close()
 
     assert statuses == (200,) * len(urls)
+
+
+def test_http_responses_remain_complete_while_treatment_is_stuck() -> None:
+    worker = WorkerTelemetry(
+        poll_interval_seconds=0.05,
+        treatment_stuck_after_seconds=0.1,
+    )
+    worker.cycle_started()
+    worker.treatment_started(selection())
+    server = TelemetryServer(worker, "127.0.0.1", 0)
+    server.start()
+    host, port = server.address
+    sleep(0.2)
+
+    def fetch(path: str) -> int:
+        try:
+            with urlopen(f"http://{host}:{port}{path}", timeout=2) as response:
+                response.read()
+                return response.status
+        except HTTPError as error:
+            error.read()
+            return error.code
+
+    try:
+        paths = tuple(
+            path for _ in range(30) for path in ("/livez", "/readyz", "/metrics")
+        )
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            statuses = tuple(pool.map(fetch, paths))
+    finally:
+        server.close()
+
+    assert statuses[0::3] == (200,) * 30
+    assert statuses[1::3] == (503,) * 30
+    assert statuses[2::3] == (200,) * 30

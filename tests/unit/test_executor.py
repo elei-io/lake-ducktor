@@ -1,8 +1,12 @@
+import duckdb
 import pytest
 
 from lakeducktor.config import MetadataConfiguration, StorageConfiguration
 from lakeducktor.executor import (
     ExecutionError,
+    ExecutionFailureReason,
+    classify_duckdb_error,
+    concise_duckdb_error,
     execute_native_treatment,
     execute_treatment,
 )
@@ -57,6 +61,7 @@ def selection(
         memory_headroom_bytes=1_000,
         usable_memory_bytes=3_000,
         max_compacted_files=max_compacted_files,
+        execution_target_file_size_bytes=100 if max_compacted_files else None,
     )
 
 
@@ -74,6 +79,7 @@ def test_merge_calls_native_function_with_schema_and_bound() -> None:
         "events",
         "analytics",
         3,
+        100,
     ]
     assert result.files_processed == 4
     assert result.files_created == 2
@@ -155,9 +161,48 @@ def test_executor_configures_writable_connection_without_exposing_secrets() -> N
     assert "PRAGMA disable_checkpoint_on_shutdown" in queries
     assert "SET threads = ?" in queries
     assert "SET memory_limit = ?" in queries
+    assert "SET ducklake_target_file_size = ?" in queries
     assert any("CREATE SECRET" in query for query in queries)
     attach = next(query for query in queries if "ATTACH" in query)
     assert "CREATE_IF_NOT_EXISTS false" in attach
     assert "READ_ONLY" not in attach
     assert not any("DETACH" in query for query in queries)
     assert all("secret" not in query for query in queries)
+
+
+@pytest.mark.parametrize(
+    ("message", "reason"),
+    [
+        (
+            "another transaction has compacted it",
+            ExecutionFailureReason.CONCURRENT_COMPACTION,
+        ),
+        (
+            "Exceeded the maximum retry count of 10",
+            ExecutionFailureReason.SNAPSHOT_RETRY_EXHAUSTED,
+        ),
+        (
+            "duplicate key violates ducklake_snapshot_pkey",
+            ExecutionFailureReason.SNAPSHOT_RETRY_EXHAUSTED,
+        ),
+        ("Out of Memory Error", ExecutionFailureReason.RESOURCE_EXHAUSTED),
+        ("HTTP Error reading S3", ExecutionFailureReason.STORAGE_ERROR),
+        ("binder failed", ExecutionFailureReason.UNKNOWN),
+    ],
+)
+def test_native_errors_are_classified(
+    message: str,
+    reason: ExecutionFailureReason,
+) -> None:
+    assert classify_duckdb_error(duckdb.Error(message)) is reason
+
+
+def test_native_error_message_is_single_line_and_bounded() -> None:
+    error = duckdb.IOException("first line\n" + ("detail " * 200))
+
+    message = concise_duckdb_error(error, limit=80)
+
+    assert message.startswith("IOException: first line detail")
+    assert "\n" not in message
+    assert len(message) <= len("IOException: ") + 80
+    assert message.endswith("...")

@@ -203,6 +203,7 @@ class TableDiagnosis:
     rewrite_deleted_rows: int
     rewrite_original_rows: int
     dangling_delete_files: int
+    minimum_merge_candidate_file_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +267,7 @@ class MergePriority:
     activity_penalty: float
     adjusted_expected_files_eliminated: float
     sorting_enabled: bool
+    minimum_input_file_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +311,9 @@ class TreatmentSelection:
     memory_headroom_bytes: int
     usable_memory_bytes: int
     max_compacted_files: int | None
+    input_files: int = 0
+    lake_target_file_size_bytes: int | None = None
+    execution_target_file_size_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

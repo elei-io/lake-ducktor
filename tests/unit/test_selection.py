@@ -49,6 +49,7 @@ def merge(
     *,
     state: PriorityState = PriorityState.RUNNABLE,
     target: int = 100,
+    minimum: int = 0,
 ) -> MergePriority:
     return MergePriority(
         rank=rank,
@@ -70,6 +71,7 @@ def merge(
         activity_penalty=0,
         adjusted_expected_files_eliminated=5,
         sorting_enabled=False,
+        minimum_input_file_bytes=minimum,
     )
 
 
@@ -117,24 +119,64 @@ def test_oversized_rewrite_does_not_block_independent_merge() -> None:
     assert decision.memory_deferred == 1
 
 
-def test_merge_batch_is_bounded_by_output_working_set() -> None:
+def test_merge_batch_uses_multiple_groups_within_input_and_memory_bounds() -> None:
     decision = select_treatment(plan(merges=(merge(1, 1),)), _ENVELOPE)
 
     assert decision.selected is not None
     assert decision.selected.input_bytes == 500
     assert decision.selected.max_compacted_files == 2
     assert decision.selected.admitted_bytes == 200
+    assert decision.selected.execution_target_file_size_bytes == 100
 
 
-def test_merge_larger_than_memory_is_deferred() -> None:
+def test_merge_execution_target_is_reduced_to_fit_memory() -> None:
     decision = select_treatment(
         plan(merges=(merge(1, 1, target=300),)),
         _ENVELOPE,
     )
 
-    assert decision.selected is None
-    assert decision.reason is SelectionReason.NO_TREATMENT_FITS_MEMORY
-    assert decision.memory_deferred == 1
+    assert decision.selected is not None
+    assert decision.selected.execution_target_file_size_bytes == 250
+    assert decision.memory_deferred == 0
+
+
+def test_tiny_file_merge_target_caps_estimated_native_inputs() -> None:
+    candidate = replace(
+        merge(1, 1, target=5_000_000, minimum=889),
+        input_files=10_000,
+        input_bytes=8_890_000,
+        average_input_file_bytes=889,
+        expected_files_eliminated=9_998,
+    )
+
+    selected = select_treatment(
+        plan(merges=(candidate,)),
+        ResourceEnvelope(1, "1GB", 1_000_000_000),
+    ).selected
+
+    assert selected is not None
+    assert selected.max_compacted_files == 1
+    assert selected.execution_target_file_size_bytes == 455_168
+    assert selected.admitted_bytes == 455_168
+
+
+def test_large_files_can_fill_many_output_groups_with_at_most_512_inputs() -> None:
+    candidate = replace(
+        merge(1, 1, target=5_000_000, minimum=2_900_000),
+        input_files=500,
+        input_bytes=1_450_000_000,
+        average_input_file_bytes=2_900_000,
+        expected_files_eliminated=250,
+    )
+
+    selected = select_treatment(
+        plan(merges=(candidate,)),
+        ResourceEnvelope(4, "4GB", 4_000_000_000),
+    ).selected
+
+    assert selected is not None
+    assert selected.max_compacted_files == 250
+    assert selected.admitted_bytes == 1_250_000_000
 
 
 def test_blocked_merge_is_not_runnable_or_memory_deferred() -> None:
@@ -214,7 +256,11 @@ def test_thread_minimum_can_consume_the_available_treatment_budget() -> None:
 
 def test_current_sorting_state_reduces_native_merge_batch() -> None:
     envelope = ResourceEnvelope(4, "4GB", 4_000_000_000)
-    unsorted = replace(merge(1, 1, target=500_000_000), sorting_enabled=False)
+    unsorted = replace(
+        merge(1, 1, target=2_500_000_000, minimum=10_000_000),
+        average_input_file_bytes=10_000_000,
+        sorting_enabled=False,
+    )
     sorted_table = replace(unsorted, sorting_enabled=True)
 
     unsorted_selection = select_treatment(
@@ -228,5 +274,7 @@ def test_current_sorting_state_reduces_native_merge_batch() -> None:
 
     assert unsorted_selection is not None
     assert sorted_selection is not None
-    assert unsorted_selection.max_compacted_files == 5
-    assert sorted_selection.max_compacted_files == 4
+    assert unsorted_selection.max_compacted_files == 1
+    assert sorted_selection.max_compacted_files == 1
+    assert unsorted_selection.admitted_bytes == 2_500_000_000
+    assert sorted_selection.admitted_bytes == 2_000_000_000

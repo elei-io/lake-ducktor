@@ -41,10 +41,9 @@ _CONFIGURATION = MetadataConfiguration(
 )
 
 
-def test_advisory_lock_key_is_stable_and_table_scoped() -> None:
-    assert advisory_lock_key("lake", 7) == advisory_lock_key("lake", 7)
-    assert advisory_lock_key("lake", 7) != advisory_lock_key("lake", 8)
-    assert advisory_lock_key("lake", 7) != advisory_lock_key("other", 7)
+def test_advisory_lock_key_is_stable_and_lake_scoped() -> None:
+    assert advisory_lock_key("lake") == advisory_lock_key("lake")
+    assert advisory_lock_key("lake") != advisory_lock_key("other")
 
 
 def test_postgres_claim_uses_session_lock_and_releases_idempotently() -> None:
@@ -54,10 +53,10 @@ def test_postgres_claim_uses_session_lock_and_releases_idempotently() -> None:
         connect=lambda _configuration: connection,
     )
 
-    claim = coordinator.try_claim("lake", 7)
+    claim = coordinator.try_claim("lake")
 
     assert claim is not None
-    lock_key = advisory_lock_key("lake", 7)
+    lock_key = advisory_lock_key("lake")
     assert connection.queries[0] == (
         "SELECT pg_try_advisory_lock(%s)",
         (lock_key,),
@@ -81,7 +80,7 @@ def test_busy_postgres_claim_closes_its_session() -> None:
         connect=lambda _configuration: connection,
     )
 
-    claim = coordinator.try_claim("lake", 7)
+    claim = coordinator.try_claim("lake")
 
     assert claim is None
     assert connection.closed is True

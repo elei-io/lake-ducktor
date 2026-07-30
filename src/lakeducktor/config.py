@@ -192,6 +192,8 @@ class RunConfiguration:
     treatment_stuck_after_seconds: float
     metrics_host: str
     metrics_port: int
+    conflict_backoff_base_seconds: float = 5.0
+    conflict_backoff_max_seconds: float = 60.0
 
     @classmethod
     def from_environment(
@@ -209,6 +211,21 @@ class RunConfiguration:
         metrics_host = values.get("METRICS_HOST", "0.0.0.0").strip()
         if not metrics_host:
             raise ConfigurationError("METRICS_HOST must not be empty")
+        conflict_backoff_base_seconds = _positive_float(
+            values,
+            "CONFLICT_BACKOFF_BASE_SECONDS",
+            5,
+        )
+        conflict_backoff_max_seconds = _positive_float(
+            values,
+            "CONFLICT_BACKOFF_MAX_SECONDS",
+            60,
+        )
+        if conflict_backoff_max_seconds < conflict_backoff_base_seconds:
+            raise ConfigurationError(
+                "CONFLICT_BACKOFF_MAX_SECONDS must be greater than or equal to "
+                "CONFLICT_BACKOFF_BASE_SECONDS"
+            )
         return cls(
             poll_interval_seconds=_positive_float(
                 values,
@@ -222,4 +239,6 @@ class RunConfiguration:
             ),
             metrics_host=metrics_host,
             metrics_port=metrics_port,
+            conflict_backoff_base_seconds=conflict_backoff_base_seconds,
+            conflict_backoff_max_seconds=conflict_backoff_max_seconds,
         )

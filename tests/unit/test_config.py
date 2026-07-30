@@ -102,6 +102,8 @@ def test_run_configuration_defaults_are_boring() -> None:
     assert configuration.treatment_stuck_after_seconds == 3_600
     assert configuration.metrics_host == "0.0.0.0"
     assert configuration.metrics_port == 8_000
+    assert configuration.conflict_backoff_base_seconds == 5
+    assert configuration.conflict_backoff_max_seconds == 60
 
 
 def test_run_configuration_accepts_operational_overrides() -> None:
@@ -111,6 +113,8 @@ def test_run_configuration_accepts_operational_overrides() -> None:
             "TREATMENT_STUCK_AFTER_SECONDS": "900",
             "METRICS_HOST": "127.0.0.1",
             "METRICS_PORT": "9090",
+            "CONFLICT_BACKOFF_BASE_SECONDS": "3",
+            "CONFLICT_BACKOFF_MAX_SECONDS": "30",
         }
     )
 
@@ -118,6 +122,8 @@ def test_run_configuration_accepts_operational_overrides() -> None:
     assert configuration.treatment_stuck_after_seconds == 900
     assert configuration.metrics_host == "127.0.0.1"
     assert configuration.metrics_port == 9_090
+    assert configuration.conflict_backoff_base_seconds == 3
+    assert configuration.conflict_backoff_max_seconds == 30
 
 
 @pytest.mark.parametrize(
@@ -128,6 +134,8 @@ def test_run_configuration_accepts_operational_overrides() -> None:
         ("TREATMENT_STUCK_AFTER_SECONDS", "-1"),
         ("METRICS_HOST", " "),
         ("METRICS_PORT", "65536"),
+        ("CONFLICT_BACKOFF_BASE_SECONDS", "0"),
+        ("CONFLICT_BACKOFF_MAX_SECONDS", "nan"),
     ],
 )
 def test_invalid_run_configuration_is_rejected(name: str, value: str) -> None:
