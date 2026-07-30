@@ -25,6 +25,7 @@ from lakeducktor.model import (
     CatalogInventory,
     MaintenanceOutcome,
     PriorityPlan,
+    PriorityState,
     TreatmentKind,
     TreatmentResult,
     TreatmentSelection,
@@ -240,6 +241,11 @@ class WorkerTelemetry:
             "Treatments blocked by treatment ordering.",
             registry=self.registry,
         )
+        self._waiting_treatments = Gauge(
+            "lakeducktor_waiting_treatments",
+            "Treatments waiting for a useful active-writer batch.",
+            registry=self.registry,
+        )
         self._memory_deferred = Gauge(
             "lakeducktor_memory_deferred_treatments",
             "Runnable treatments that do not fit this worker.",
@@ -254,6 +260,11 @@ class WorkerTelemetry:
         self._merge_file_debt = Gauge(
             "lakeducktor_merge_expected_files_eliminated",
             "Estimated files remaining to eliminate through merge treatments.",
+            registry=self.registry,
+        )
+        self._merge_waiting_file_debt = Gauge(
+            "lakeducktor_merge_waiting_expected_files_eliminated",
+            "Merge file debt waiting for an active-writer batch or quiet period.",
             registry=self.registry,
         )
         self._rewrite_file_debt = Gauge(
@@ -333,12 +344,20 @@ class WorkerTelemetry:
         self._attention_tables.set(plan.attention_tables)
         self._runnable_treatments.set(plan.runnable)
         self._blocked_treatments.set(plan.blocked)
+        self._waiting_treatments.set(getattr(plan, "waiting", 0))
         self._memory_deferred.set(memory_deferred)
         self._recent_data_files.labels(window="60s").set(
             sum(table.recent_data_files_60s for table in tables)
         )
         self._merge_file_debt.set(
             sum(candidate.expected_files_eliminated for candidate in plan.merges)
+        )
+        self._merge_waiting_file_debt.set(
+            sum(
+                candidate.expected_files_eliminated
+                for candidate in plan.merges
+                if candidate.state is PriorityState.WAITING
+            )
         )
         self._rewrite_file_debt.set(sum(table.rewrite_data_files for table in tables))
         self._inlined_row_debt.set(sum(table.inlined_data_rows for table in tables))

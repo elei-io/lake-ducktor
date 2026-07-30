@@ -348,6 +348,8 @@ def test_prioritize_command_logs_separate_treatment_lanes(
         activity_penalty=2,
         adjusted_expected_files_eliminated=0,
         sorting_enabled=False,
+        input_groups=(),
+        waiting_reason=None,
     )
     monkeypatch.setattr(
         "lakeducktor.cli.prioritize",
@@ -358,6 +360,7 @@ def test_prioritize_command_logs_separate_treatment_lanes(
             merges=(merge,),
             runnable=1,
             blocked=1,
+            waiting=0,
             excluded_tables=0,
             attention_tables=0,
         ),
@@ -386,7 +389,7 @@ def test_prioritize_command_logs_separate_treatment_lanes(
         "priority_summary snapshot_expirations=0 scheduled_file_cleanups=0 "
         "orphan_file_cleanups=0 inline_flushes=0 "
         "delete_rewrites=1 merges=1 "
-        "runnable=1 blocked=1 "
+        "runnable=1 blocked=1 waiting=0 "
         "excluded=0 attention=0"
     ) in messages
 

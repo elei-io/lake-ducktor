@@ -147,6 +147,101 @@ def test_priority_preserves_compatible_merge_groups_for_admission() -> None:
     assert plan.merges[0].input_groups == (group,)
 
 
+def test_active_writer_waits_for_a_useful_merge_batch() -> None:
+    group = CompatibleFileGroup(1, 7, 31, 31, 31, 31)
+    candidate = table_diagnosis(
+        1,
+        state=DiagnosisState.ACTIONABLE,
+        reasons=("merge_pressure",),
+        recent_data_files_60s=31,
+        merge_groups=1,
+        merge_input_files=31,
+        merge_input_bytes=31,
+        expected_files_eliminated=30,
+        merge_candidate_groups=(group,),
+    )
+
+    plan = prioritize(catalog(candidate))
+
+    assert plan.merges[0].state is PriorityState.WAITING
+    assert plan.merges[0].waiting_reason == "active_writer_batching"
+    assert plan.merges[0].input_groups == ()
+    assert plan.runnable == 0
+    assert plan.waiting == 1
+
+
+@pytest.mark.parametrize(
+    ("files", "input_bytes"),
+    (
+        (32, 32),
+        (2, 100),
+    ),
+)
+def test_active_writer_runs_when_group_reaches_a_useful_batch(
+    files: int,
+    input_bytes: int,
+) -> None:
+    group = CompatibleFileGroup(1, 7, files, input_bytes, files, input_bytes)
+    candidate = table_diagnosis(
+        1,
+        state=DiagnosisState.ACTIONABLE,
+        reasons=("merge_pressure",),
+        recent_data_files_60s=files,
+        merge_groups=1,
+        merge_input_files=files,
+        merge_input_bytes=input_bytes,
+        expected_files_eliminated=files - 1,
+        merge_candidate_groups=(group,),
+    )
+
+    merge = prioritize(catalog(candidate)).merges[0]
+
+    assert merge.state is PriorityState.RUNNABLE
+    assert merge.waiting_reason is None
+    assert merge.input_groups == (group,)
+
+
+def test_quiet_writer_drains_a_small_merge_tail() -> None:
+    group = CompatibleFileGroup(1, 7, 2, 2, 2, 2)
+    candidate = table_diagnosis(
+        1,
+        state=DiagnosisState.ACTIONABLE,
+        reasons=("merge_pressure",),
+        recent_data_files_60s=0,
+        merge_groups=1,
+        merge_input_files=2,
+        merge_input_bytes=2,
+        expected_files_eliminated=1,
+        merge_candidate_groups=(group,),
+    )
+
+    merge = prioritize(catalog(candidate)).merges[0]
+
+    assert merge.state is PriorityState.RUNNABLE
+    assert merge.input_groups == (group,)
+
+
+def test_active_writer_admits_only_ready_compatible_groups() -> None:
+    waiting = CompatibleFileGroup(1, 7, 3, 3, 3, 3)
+    ready = CompatibleFileGroup(1, 8, 32, 32, 32, 32)
+    candidate = table_diagnosis(
+        1,
+        state=DiagnosisState.ACTIONABLE,
+        reasons=("merge_pressure",),
+        recent_data_files_60s=35,
+        merge_groups=2,
+        merge_input_files=35,
+        merge_input_bytes=35,
+        expected_files_eliminated=33,
+        merge_candidate_groups=(waiting, ready),
+    )
+
+    merge = prioritize(catalog(candidate)).merges[0]
+
+    assert merge.state is PriorityState.RUNNABLE
+    assert merge.input_groups == (ready,)
+
+
 def test_scheduled_cleanup_is_ranked_at_lake_scope() -> None:
     diagnosis = CatalogDiagnosis(
         lakes=(

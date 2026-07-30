@@ -6,6 +6,7 @@ from fractions import Fraction
 
 from lakeducktor.model import (
     CatalogDiagnosis,
+    CompatibleFileGroup,
     DeleteRewritePriority,
     DiagnosisState,
     InlineFlushPriority,
@@ -26,6 +27,7 @@ class PriorityError(RuntimeError):
 
 _RECENT_FILE_PENALTY_CAP = 32
 _RECENT_FILES_PER_ELIMINATION = 4
+_ACTIVE_MERGE_MIN_FILES_PER_GROUP = 32
 
 
 def merge_activity_penalty(recent_data_files_60s: int) -> Fraction:
@@ -36,6 +38,31 @@ def merge_activity_penalty(recent_data_files_60s: int) -> Fraction:
     return Fraction(
         min(recent_data_files_60s, _RECENT_FILE_PENALTY_CAP),
         _RECENT_FILES_PER_ELIMINATION,
+    )
+
+
+def _ready_merge_groups(
+    table: TableDiagnosis,
+) -> tuple[CompatibleFileGroup, ...]:
+    if table.recent_data_files_60s == 0:
+        return table.merge_candidate_groups
+    return tuple(
+        group
+        for group in table.merge_candidate_groups
+        if (
+            group.merge_candidate_files >= _ACTIVE_MERGE_MIN_FILES_PER_GROUP
+            or group.merge_candidate_bytes >= table.target_file_size_bytes
+        )
+    )
+
+
+def _aggregate_merge_ready(table: TableDiagnosis) -> bool:
+    """Preserve safe behavior when a caller lacks compatible-group detail."""
+
+    return (
+        table.recent_data_files_60s == 0
+        or table.merge_input_files >= _ACTIVE_MERGE_MIN_FILES_PER_GROUP
+        or table.merge_input_bytes >= table.target_file_size_bytes
     )
 
 
@@ -215,6 +242,10 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
     def merge_key(table: TableDiagnosis) -> tuple:
         key = (table.metadata_schema, table.table_id)
         blocked = key in rewrite_keys or key in flush_keys
+        ready_groups = _ready_merge_groups(table)
+        ready = bool(ready_groups) or (
+            not table.merge_candidate_groups and _aggregate_merge_ready(table)
+        )
         adjusted_eliminations = Fraction(
             table.expected_files_eliminated
         ) - merge_activity_penalty(table.recent_data_files_60s)
@@ -223,6 +254,7 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
             table.merge_input_files * table.target_file_size_bytes,
         )
         return (
+            blocked or not ready,
             blocked,
             -adjusted_eliminations,
             -table.expected_files_eliminated,
@@ -235,6 +267,12 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
     merge_tables.sort(key=merge_key)
     merge_priorities = []
     for rank, table in enumerate(merge_tables, start=1):
+        key = (table.metadata_schema, table.table_id)
+        blocked = key in rewrite_keys or key in flush_keys
+        ready_groups = _ready_merge_groups(table)
+        ready = bool(ready_groups) or (
+            not table.merge_candidate_groups and _aggregate_merge_ready(table)
+        )
         activity_penalty = merge_activity_penalty(table.recent_data_files_60s)
         adjusted_eliminations = (
             Fraction(table.expected_files_eliminated) - activity_penalty
@@ -248,11 +286,10 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
                 table_name=table.table_name,
                 state=(
                     PriorityState.BLOCKED
-                    if (
-                        (table.metadata_schema, table.table_id) in rewrite_keys
-                        or (table.metadata_schema, table.table_id) in flush_keys
-                    )
+                    if blocked
                     else PriorityState.RUNNABLE
+                    if ready
+                    else PriorityState.WAITING
                 ),
                 blocked_by=(
                     TreatmentKind.INLINE_FLUSH
@@ -274,7 +311,16 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
                 adjusted_expected_files_eliminated=float(adjusted_eliminations),
                 sorting_enabled=table.sorting_enabled,
                 minimum_input_file_bytes=(table.minimum_merge_candidate_file_bytes),
-                input_groups=table.merge_candidate_groups,
+                input_groups=(
+                    ready_groups
+                    if table.recent_data_files_60s > 0
+                    else table.merge_candidate_groups
+                ),
+                waiting_reason=(
+                    "active_writer_batching"
+                    if not blocked and not ready
+                    else None
+                ),
             )
         )
     merges = tuple(merge_priorities)

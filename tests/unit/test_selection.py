@@ -341,6 +341,17 @@ def test_blocked_merge_is_not_runnable_or_memory_deferred() -> None:
     assert decision.memory_deferred == 0
 
 
+def test_waiting_merge_is_not_runnable_or_memory_deferred() -> None:
+    decision = select_treatment(
+        plan(merges=(merge(1, 1, state=PriorityState.WAITING),)),
+        _ENVELOPE,
+    )
+
+    assert decision.selected is None
+    assert decision.reason is SelectionReason.NO_RUNNABLE_TREATMENTS
+    assert decision.memory_deferred == 0
+
+
 def test_invalid_merge_output_estimate_is_rejected() -> None:
     candidate = replace(merge(1, 1), expected_files_eliminated=10)
 

@@ -201,11 +201,6 @@ def _merge_selection(
         raise SelectionError(
             f"merge has an invalid target size for table_id={candidate.table_id}"
         )
-    expected_output_files = candidate.input_files - candidate.expected_files_eliminated
-    if expected_output_files <= 0:
-        raise SelectionError(
-            f"merge has an invalid output estimate for table_id={candidate.table_id}"
-        )
     headroom, usable_memory = treatment_memory_budget(
         envelope,
         candidate.sorting_enabled,
@@ -259,6 +254,11 @@ def _merge_selection(
                 execution_target_file_size_bytes=execution_target,
                 admitted_input_files=admitted_files,
             )
+    expected_output_files = candidate.input_files - candidate.expected_files_eliminated
+    if expected_output_files <= 0:
+        raise SelectionError(
+            f"merge has an invalid output estimate for table_id={candidate.table_id}"
+        )
     minimum_input_file_bytes = (
         candidate.minimum_input_file_bytes
         if candidate.minimum_input_file_bytes > 0
@@ -383,7 +383,7 @@ def select_treatment(
             fitting_rewrites.append(selection)
 
     for candidate in plan.merges:
-        if candidate.state is PriorityState.BLOCKED:
+        if candidate.state is not PriorityState.RUNNABLE:
             continue
         key = (candidate.metadata_schema, candidate.table_id)
         if key in unavailable_tables:

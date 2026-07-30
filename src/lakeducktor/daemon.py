@@ -607,7 +607,7 @@ def maintenance_cycle(
             "cycle metadata_backend=%s lakes=%s tables=%s "
             "actionable_tables=%s expiring_snapshots=%s "
             "cleanup_eligible_files=%s orphan_files=%s "
-            "runnable=%s blocked=%s memory_deferred=%s",
+            "runnable=%s blocked=%s waiting=%s memory_deferred=%s",
             detection.backend.value,
             len(detection.metadata_schemas),
             current_inventory.table_count,
@@ -617,6 +617,7 @@ def maintenance_cycle(
             sum(lake.orphan_files for lake in diagnosis.lakes),
             plan.runnable,
             plan.blocked,
+            plan.waiting,
             decision.memory_deferred,
         )
         return maintain_once(

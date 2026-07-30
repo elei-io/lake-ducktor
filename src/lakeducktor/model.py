@@ -38,6 +38,7 @@ class TreatmentKind(StrEnum):
 class PriorityState(StrEnum):
     RUNNABLE = "runnable"
     BLOCKED = "blocked"
+    WAITING = "waiting"
 
 
 class SelectionReason(StrEnum):
@@ -294,6 +295,7 @@ class MergePriority:
     sorting_enabled: bool
     minimum_input_file_bytes: int = 0
     input_groups: tuple[CompatibleFileGroup, ...] = ()
+    waiting_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +368,12 @@ class PriorityPlan:
     def blocked(self) -> int:
         return sum(
             candidate.state is PriorityState.BLOCKED for candidate in self.merges
+        )
+
+    @property
+    def waiting(self) -> int:
+        return sum(
+            candidate.state is PriorityState.WAITING for candidate in self.merges
         )
 
 

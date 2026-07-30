@@ -205,10 +205,16 @@ benefit using information that the native operation will actually honor.
 Recent writer activity is a small negative merge signal. LakeDucktor counts
 active data files created by insertion snapshots during the previous minute,
 then subtracts one expected file elimination per four recent files, capped at
-eight. This lets similarly valuable quiet tables go first without making a
-continuously written table ineligible or allowing the penalty to grow without
-bound. Delete rewrites are unaffected because leaving delete-heavy data in
-place has a different correctness and cost profile.
+eight. This lets similarly valuable quiet tables go first without allowing the
+penalty to grow without bound. Delete rewrites are unaffected because leaving
+delete-heavy data in place has a different correctness and cost profile.
+
+Merge debt and merge readiness are separate. A quiet table may drain any
+productive compatible group. While a table has insertion files from the
+previous minute, a compatible group becomes ready only after it reaches 32
+candidate files or one target file's worth of candidate bytes. Smaller active
+groups remain visible as `active_writer_batching` rather than repeatedly
+rewriting the previous merge output for every arriving file.
 
 Delete rewrites have a different benefit model: live input bytes describe
 cost, while eligible delete files, deleted rows, and deleted fraction describe

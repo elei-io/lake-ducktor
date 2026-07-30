@@ -316,8 +316,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         _LOGGER.info(
                             "priority kind=merge rank=%s lake=%s table_id=%s "
                             "schema=%r table=%r state=%s blocked_by=%s "
+                            "waiting_reason=%s "
                             "sorting_enabled=%s "
-                            "groups=%s input_files=%s input_bytes=%s "
+                            "groups=%s ready_groups=%s "
+                            "input_files=%s input_bytes=%s "
                             "average_input_file_bytes=%s "
                             "expected_files_eliminated=%s "
                             "recent_data_files_60s=%s activity_penalty=%.2f "
@@ -331,8 +333,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                             candidate.blocked_by.value
                             if candidate.blocked_by is not None
                             else "none",
+                            candidate.waiting_reason or "none",
                             str(candidate.sorting_enabled).lower(),
                             candidate.groups,
+                            len(candidate.input_groups),
                             candidate.input_files,
                             candidate.input_bytes,
                             candidate.average_input_file_bytes,
@@ -346,7 +350,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "scheduled_file_cleanups=%s orphan_file_cleanups=%s "
                         "inline_flushes=%s "
                         "delete_rewrites=%s merges=%s "
-                        "runnable=%s blocked=%s excluded=%s attention=%s",
+                        "runnable=%s blocked=%s waiting=%s "
+                        "excluded=%s attention=%s",
                         len(getattr(plan, "snapshot_expirations", ())),
                         len(plan.scheduled_file_cleanups),
                         len(getattr(plan, "orphan_file_cleanups", ())),
@@ -355,6 +360,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         len(plan.merges),
                         plan.runnable,
                         plan.blocked,
+                        plan.waiting,
                         plan.excluded_tables,
                         plan.attention_tables,
                     )

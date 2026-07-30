@@ -12,6 +12,11 @@ native DuckLake operation. Useful work drains immediately. No work, contention,
 resource deferral, native no-progress, and failures wait
 `POLL_INTERVAL_SECONDS` before retrying.
 
+Merge debt on an actively written table waits until a compatible group has 32
+candidate files or one target file's worth of candidate bytes. The debt
+remains observable while waiting. After one minute without inserted files,
+productive merge tails drain without the active-writer threshold.
+
 Scheduled-file eligibility is obtained from DuckLake's own read-only cleanup
 dry run. The worker does not override `delete_older_than`; a cleanup treatment
 uses the lake's persisted policy or the extension's native default.

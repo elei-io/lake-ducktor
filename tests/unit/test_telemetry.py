@@ -12,6 +12,7 @@ from lakeducktor.executor import ExecutionError, ExecutionFailureReason
 from lakeducktor.model import (
     MaintenanceOutcome,
     MaintenanceState,
+    PriorityState,
     TreatmentKind,
     TreatmentResult,
     TreatmentSelection,
@@ -250,6 +251,51 @@ def test_recent_insertion_files_are_exposed_as_an_aggregate_metric() -> None:
     assert "lakeducktor_cleanup_eligible_files 3.0" in metrics
     assert "lakeducktor_expiring_snapshots 4.0" in metrics
     assert "lakeducktor_orphan_files 9.0" in metrics
+
+
+def test_waiting_merge_debt_remains_visible() -> None:
+    worker = telemetry(FakeClock())
+    table = SimpleNamespace(
+        state=SimpleNamespace(value="actionable"),
+        recent_data_files_60s=31,
+        rewrite_data_files=0,
+        inlined_data_rows=0,
+        inlined_data_bytes=0,
+    )
+    waiting_merge = SimpleNamespace(
+        state=PriorityState.WAITING,
+        expected_files_eliminated=30,
+    )
+
+    worker.observe_plan(
+        SimpleNamespace(
+            scheduled_files=0,
+            lakes=(
+                SimpleNamespace(
+                    dangling_delete_files=0,
+                    cleanup_eligible_files=0,
+                    expiring_snapshots=0,
+                    orphan_files=0,
+                ),
+            ),
+        ),
+        SimpleNamespace(lakes=(SimpleNamespace(tables=(table,)),)),
+        SimpleNamespace(
+            excluded_tables=0,
+            attention_tables=0,
+            runnable=0,
+            blocked=0,
+            waiting=1,
+            merges=(waiting_merge,),
+        ),
+        memory_deferred=0,
+    )
+
+    metrics = generate_latest(worker.registry).decode()
+
+    assert "lakeducktor_waiting_treatments 1.0" in metrics
+    assert "lakeducktor_merge_expected_files_eliminated 30.0" in metrics
+    assert "lakeducktor_merge_waiting_expected_files_eliminated 30.0" in metrics
 
 
 def test_http_health_endpoints_and_metrics_share_no_worker_connection() -> None:
