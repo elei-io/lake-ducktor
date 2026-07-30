@@ -6,12 +6,14 @@ from lakeducktor.model import (
     DeleteRewritePriority,
     InlineFlushPriority,
     MergePriority,
+    OrphanFileCleanupPriority,
     PriorityPlan,
     PriorityState,
     ResourceEnvelope,
     ScheduledFileCleanupPriority,
     SelectionDecision,
     SelectionReason,
+    SnapshotExpirationPriority,
     TreatmentKind,
     TreatmentSelection,
 )
@@ -25,6 +27,33 @@ _MINIMUM_BYTES_PER_THREAD = 125_000_000
 _MAXIMUM_MERGE_INPUT_FILES = 512
 _UNSORTED_HEADROOM_DIVISOR = 4
 _SORTED_HEADROOM_DIVISOR = 2
+
+
+def _snapshot_expiration_selection(
+    candidate: SnapshotExpirationPriority,
+    envelope: ResourceEnvelope,
+) -> TreatmentSelection:
+    if candidate.snapshots <= 0:
+        raise SelectionError(
+            "snapshot expiration has no eligible snapshots for "
+            f"lake={candidate.metadata_schema}"
+        )
+    return TreatmentSelection(
+        kind=TreatmentKind.SNAPSHOT_EXPIRATION,
+        priority_rank=candidate.rank,
+        metadata_schema=candidate.metadata_schema,
+        table_id=None,
+        schema_name=None,
+        table_name=None,
+        input_bytes=0,
+        admitted_bytes=0,
+        sorting_enabled=False,
+        memory_headroom_bytes=0,
+        usable_memory_bytes=envelope.duckdb_memory_bytes,
+        max_compacted_files=None,
+        input_snapshots=candidate.snapshots,
+        retention_policy=candidate.expire_older_than,
+    )
 
 
 def _scheduled_file_cleanup_selection(
@@ -50,6 +79,33 @@ def _scheduled_file_cleanup_selection(
         usable_memory_bytes=envelope.duckdb_memory_bytes,
         max_compacted_files=None,
         input_files=candidate.eligible_files,
+        retention_policy=candidate.delete_older_than or "native_default",
+    )
+
+
+def _orphan_file_cleanup_selection(
+    candidate: OrphanFileCleanupPriority,
+    envelope: ResourceEnvelope,
+) -> TreatmentSelection:
+    if candidate.orphan_files <= 0:
+        raise SelectionError(
+            "orphan-file cleanup has no eligible files for "
+            f"lake={candidate.metadata_schema}"
+        )
+    return TreatmentSelection(
+        kind=TreatmentKind.ORPHAN_FILE_CLEANUP,
+        priority_rank=candidate.rank,
+        metadata_schema=candidate.metadata_schema,
+        table_id=None,
+        schema_name=None,
+        table_name=None,
+        input_bytes=0,
+        admitted_bytes=0,
+        sorting_enabled=False,
+        memory_headroom_bytes=0,
+        usable_memory_bytes=envelope.duckdb_memory_bytes,
+        max_compacted_files=None,
+        input_files=candidate.orphan_files,
         retention_policy=candidate.delete_older_than or "native_default",
     )
 
@@ -215,19 +271,41 @@ def select_treatment(
     if envelope.duckdb_threads <= 0 or envelope.duckdb_memory_bytes <= 0:
         raise SelectionError("resource envelope must be greater than zero")
 
-    fitting_cleanups: list[TreatmentSelection] = []
+    fitting_expirations: list[TreatmentSelection] = []
+    fitting_scheduled_cleanups: list[TreatmentSelection] = []
+    fitting_orphan_cleanups: list[TreatmentSelection] = []
     fitting_rewrites: list[TreatmentSelection] = []
     fitting_flushes: list[TreatmentSelection] = []
     fitting_merges: list[TreatmentSelection] = []
     memory_deferred = 0
     available_runnable = 0
 
+    for candidate in plan.snapshot_expirations:
+        key = (candidate.metadata_schema, None)
+        if key in unavailable_tables:
+            continue
+        available_runnable += 1
+        fitting_expirations.append(
+            _snapshot_expiration_selection(candidate, envelope)
+        )
+
     for candidate in plan.scheduled_file_cleanups:
         key = (candidate.metadata_schema, None)
         if key in unavailable_tables:
             continue
         available_runnable += 1
-        fitting_cleanups.append(_scheduled_file_cleanup_selection(candidate, envelope))
+        fitting_scheduled_cleanups.append(
+            _scheduled_file_cleanup_selection(candidate, envelope)
+        )
+
+    for candidate in plan.orphan_file_cleanups:
+        key = (candidate.metadata_schema, None)
+        if key in unavailable_tables:
+            continue
+        available_runnable += 1
+        fitting_orphan_cleanups.append(
+            _orphan_file_cleanup_selection(candidate, envelope)
+        )
 
     for candidate in plan.inline_flushes:
         key = (candidate.metadata_schema, candidate.table_id)
@@ -265,7 +343,14 @@ def select_treatment(
             fitting_merges.append(selection)
 
     selected = next(
-        iter(fitting_cleanups or fitting_rewrites or fitting_flushes or fitting_merges),
+        iter(
+            fitting_expirations
+            or fitting_scheduled_cleanups
+            or fitting_orphan_cleanups
+            or fitting_rewrites
+            or fitting_flushes
+            or fitting_merges
+        ),
         None,
     )
     if selected is not None:
@@ -290,10 +375,20 @@ def readmit_treatment(
     """Re-admit the same treatment from freshly diagnosed state."""
 
     key = (previous.metadata_schema, previous.table_id)
+    if previous.kind is TreatmentKind.SNAPSHOT_EXPIRATION:
+        for candidate in plan.snapshot_expirations:
+            if candidate.metadata_schema == previous.metadata_schema:
+                return _snapshot_expiration_selection(candidate, envelope)
+        return None
     if previous.kind is TreatmentKind.SCHEDULED_FILE_CLEANUP:
         for candidate in plan.scheduled_file_cleanups:
             if candidate.metadata_schema == previous.metadata_schema:
                 return _scheduled_file_cleanup_selection(candidate, envelope)
+        return None
+    if previous.kind is TreatmentKind.ORPHAN_FILE_CLEANUP:
+        for candidate in plan.orphan_file_cleanups:
+            if candidate.metadata_schema == previous.metadata_schema:
+                return _orphan_file_cleanup_selection(candidate, envelope)
         return None
     if previous.kind is TreatmentKind.INLINE_FLUSH:
         for candidate in plan.inline_flushes:

@@ -30,7 +30,11 @@ from lakeducktor.executor import (
     IsolatedTreatmentExecutor,
     execute_treatment,
 )
-from lakeducktor.inventory import InventoryError, inventory_catalog
+from lakeducktor.inventory import (
+    InventoryError,
+    MaintenanceInventory,
+    inventory_catalog,
+)
 from lakeducktor.lake import BackendDetectionError, detect_metadata_backend
 from lakeducktor.model import (
     BackendDetection,
@@ -173,11 +177,13 @@ def _selected_table_input_files(
     selection: TreatmentSelection,
 ) -> int | None:
     for lake in inventory.lakes:
-        if (
-            selection.kind is TreatmentKind.SCHEDULED_FILE_CLEANUP
-            and lake.metadata_schema == selection.metadata_schema
-        ):
-            return lake.cleanup_eligible_files
+        if lake.metadata_schema == selection.metadata_schema:
+            if selection.kind is TreatmentKind.SNAPSHOT_EXPIRATION:
+                return lake.expiring_snapshots
+            if selection.kind is TreatmentKind.SCHEDULED_FILE_CLEANUP:
+                return lake.cleanup_eligible_files
+            if selection.kind is TreatmentKind.ORPHAN_FILE_CLEANUP:
+                return lake.orphan_files
         for table in lake.tables:
             if (
                 table.metadata_schema == selection.metadata_schema
@@ -208,7 +214,11 @@ def _still_actionable(
     diagnosis,
     selection: TreatmentSelection,
 ) -> tuple[bool, bool]:
-    if selection.kind is TreatmentKind.SCHEDULED_FILE_CLEANUP:
+    if selection.kind in {
+        TreatmentKind.SNAPSHOT_EXPIRATION,
+        TreatmentKind.SCHEDULED_FILE_CLEANUP,
+        TreatmentKind.ORPHAN_FILE_CLEANUP,
+    }:
         lake = next(
             (
                 lake
@@ -219,7 +229,11 @@ def _still_actionable(
         )
         if lake is None:
             return False, False
-        return True, lake.cleanup_eligible_files > 0
+        if selection.kind is TreatmentKind.SNAPSHOT_EXPIRATION:
+            return True, lake.expiring_snapshots > 0
+        if selection.kind is TreatmentKind.SCHEDULED_FILE_CLEANUP:
+            return True, lake.cleanup_eligible_files > 0
+        return True, lake.orphan_files > 0
     table = next(
         (
             table
@@ -267,6 +281,8 @@ def maintain_once(
 ) -> MaintenanceOutcome:
     """Claim, revalidate, and execute at most one treatment."""
 
+    if inventory is inventory_catalog:
+        inventory = MaintenanceInventory(storage)
     unavailable: set[tuple[str, int | None]] = set()
     claim_contention = 0
     try:
@@ -300,7 +316,9 @@ def maintain_once(
                     getattr(candidate, "table_id", None),
                 )
                 for candidate in (
+                    *initial_plan.snapshot_expirations,
                     *initial_plan.scheduled_file_cleanups,
+                    *initial_plan.orphan_file_cleanups,
                     *initial_plan.inline_flushes,
                     *initial_plan.delete_rewrites,
                     *initial_plan.merges,
@@ -344,6 +362,7 @@ def maintain_once(
                 _LOGGER.info(
                     "treatment_started kind=%s lake=%s table_id=%s "
                     "schema=%r table=%r input_files=%s input_rows=%s "
+                    "input_snapshots=%s "
                     "input_bytes=%s "
                     "lake_target_bytes=%s execution_target_bytes=%s "
                     "admitted_bytes=%s "
@@ -357,6 +376,7 @@ def maintain_once(
                     selection.table_name,
                     selection.input_files,
                     selection.input_rows,
+                    selection.input_snapshots,
                     selection.input_bytes,
                     selection.lake_target_file_size_bytes
                     if selection.lake_target_file_size_bytes is not None
@@ -455,6 +475,13 @@ def maintain_once(
                     )
                     raise
                 duration_seconds = monotonic() - started
+                treatment_completed = getattr(
+                    inventory,
+                    "treatment_completed",
+                    None,
+                )
+                if treatment_completed is not None:
+                    treatment_completed(selection, result)
                 if observer is not None:
                     observer.treatment_finished(
                         selection,
@@ -465,6 +492,7 @@ def maintain_once(
                 _LOGGER.info(
                     "treatment_native_completed kind=%s lake=%s table_id=%s "
                     "files_processed=%s files_created=%s rows_processed=%s "
+                    "snapshots_processed=%s "
                     "duration_seconds=%.3f",
                     selection.kind.value,
                     selection.metadata_schema,
@@ -472,6 +500,7 @@ def maintain_once(
                     result.files_processed,
                     result.files_created,
                     result.rows_processed,
+                    result.snapshots_processed,
                     duration_seconds,
                 )
                 _, verification, _ = _fresh_state(
@@ -536,6 +565,8 @@ def maintenance_cycle(
     """Discover all state afresh and perform at most one treatment."""
 
     try:
+        if inventory is inventory_catalog:
+            inventory = MaintenanceInventory(storage)
         detection = detect(configuration)
         adapter_for(detection)
         if detection.backend is not MetadataBackend.POSTGRES:
@@ -555,13 +586,16 @@ def maintenance_cycle(
             )
         _LOGGER.info(
             "cycle metadata_backend=%s lakes=%s tables=%s "
-            "actionable_tables=%s cleanup_eligible_files=%s "
+            "actionable_tables=%s expiring_snapshots=%s "
+            "cleanup_eligible_files=%s orphan_files=%s "
             "runnable=%s blocked=%s memory_deferred=%s",
             detection.backend.value,
             len(detection.metadata_schemas),
             current_inventory.table_count,
             sum(lake.actionable_tables for lake in diagnosis.lakes),
+            sum(lake.expiring_snapshots for lake in diagnosis.lakes),
             sum(lake.cleanup_eligible_files for lake in diagnosis.lakes),
+            sum(lake.orphan_files for lake in diagnosis.lakes),
             plan.runnable,
             plan.blocked,
             decision.memory_deferred,
@@ -655,6 +689,7 @@ def run_loop(
                     and outcome.result.files_processed == 0
                     and outcome.result.files_created == 0
                     and outcome.result.rows_processed == 0
+                    and outcome.result.snapshots_processed == 0
                 ):
                     should_wait = True
                     _LOGGER.warning(
@@ -716,15 +751,21 @@ def run_service(
         raise RunError(str(error)) from error
     stop_event = Event()
     execute_isolated = IsolatedTreatmentExecutor(stop_event)
+    maintenance_inventory = MaintenanceInventory(
+        storage,
+        orphan_scan_interval_seconds=configuration.orphan_scan_interval_seconds,
+    )
     restore_signals = _install_signal_handlers(stop_event, telemetry)
     try:
         server.start()
         host, port = server.address
         _LOGGER.info(
             "worker_started poll_interval_seconds=%.3f "
-            "treatment_stuck_after_seconds=%.3f metrics=%s:%s",
+            "treatment_stuck_after_seconds=%.3f "
+            "orphan_scan_interval_seconds=%.3f metrics=%s:%s",
             configuration.poll_interval_seconds,
             configuration.treatment_stuck_after_seconds,
+            configuration.orphan_scan_interval_seconds,
             host,
             port,
         )
@@ -734,6 +775,7 @@ def run_service(
                 storage,
                 envelope,
                 observer=telemetry,
+                inventory=maintenance_inventory,
                 execute=execute_isolated,
             ),
             configuration,

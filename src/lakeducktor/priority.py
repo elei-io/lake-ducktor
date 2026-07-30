@@ -10,9 +10,11 @@ from lakeducktor.model import (
     DiagnosisState,
     InlineFlushPriority,
     MergePriority,
+    OrphanFileCleanupPriority,
     PriorityPlan,
     PriorityState,
     ScheduledFileCleanupPriority,
+    SnapshotExpirationPriority,
     TableDiagnosis,
     TreatmentKind,
 )
@@ -44,6 +46,24 @@ def _tables(diagnosis: CatalogDiagnosis) -> tuple[TableDiagnosis, ...]:
 def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
     """Create separate, explainable rewrite and merge rankings."""
 
+    expiration_lakes = [
+        lake for lake in diagnosis.lakes if lake.expiring_snapshots > 0
+    ]
+    expiration_lakes.sort(
+        key=lambda lake: (
+            -lake.expiring_snapshots,
+            lake.metadata_schema,
+        )
+    )
+    snapshot_expirations = tuple(
+        SnapshotExpirationPriority(
+            rank=rank,
+            metadata_schema=lake.metadata_schema,
+            snapshots=lake.expiring_snapshots,
+            expire_older_than=lake.expire_older_than or "native_default",
+        )
+        for rank, lake in enumerate(expiration_lakes, start=1)
+    )
     cleanup_lakes = [
         lake for lake in diagnosis.lakes if lake.cleanup_eligible_files > 0
     ]
@@ -65,6 +85,22 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
             delete_older_than=lake.delete_older_than,
         )
         for rank, lake in enumerate(cleanup_lakes, start=1)
+    )
+    orphan_lakes = [lake for lake in diagnosis.lakes if lake.orphan_files > 0]
+    orphan_lakes.sort(
+        key=lambda lake: (
+            -lake.orphan_files,
+            lake.metadata_schema,
+        )
+    )
+    orphan_file_cleanups = tuple(
+        OrphanFileCleanupPriority(
+            rank=rank,
+            metadata_schema=lake.metadata_schema,
+            orphan_files=lake.orphan_files,
+            delete_older_than=lake.delete_older_than,
+        )
+        for rank, lake in enumerate(orphan_lakes, start=1)
     )
     tables = _tables(diagnosis)
     flush_tables = [
@@ -237,4 +273,6 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
         ),
         inline_flushes=inline_flushes,
         scheduled_file_cleanups=scheduled_file_cleanups,
+        snapshot_expirations=snapshot_expirations,
+        orphan_file_cleanups=orphan_file_cleanups,
     )

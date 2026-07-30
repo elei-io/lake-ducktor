@@ -1,21 +1,28 @@
 from collections.abc import Iterable
 from unittest.mock import Mock, patch
 
-from lakeducktor.config import MetadataConfiguration
+from lakeducktor.config import MetadataConfiguration, StorageConfiguration
 from lakeducktor.inventory import (
     CompatibleFileGroupRow,
     DuckDBInventorySource,
     InlinedDataRow,
     LakeSummaryRow,
+    MaintenanceInventory,
     TableInventoryRow,
     _cleanup_eligible_files,
+    _expiring_snapshots,
+    _orphan_files,
     collect_inventory,
     inventory_catalog,
 )
 from lakeducktor.model import (
     BackendDetection,
     CatalogInventory,
+    LakeInventory,
     MetadataBackend,
+    TreatmentKind,
+    TreatmentResult,
+    TreatmentSelection,
 )
 
 
@@ -270,3 +277,153 @@ def test_cleanup_probe_delegates_policy_to_native_dry_run() -> None:
     assert "older_than" not in cleanup
     assert "cleanup_all" not in cleanup
     assert not any("DETACH" in query for query in queries)
+
+
+def test_expiration_probe_delegates_policy_to_native_dry_run() -> None:
+    connection = Mock()
+    result = Mock()
+    result.fetchone.return_value = (4,)
+    connection.execute.side_effect = [
+        connection,
+        connection,
+        connection,
+        connection,
+        connection,
+        connection,
+        result,
+    ]
+    configuration = MetadataConfiguration(
+        backend_hint="postgres",
+        host="catalog.example",
+        port=5432,
+        username="user",
+        password="password",
+        database="lake",
+    )
+
+    with patch("lakeducktor.inventory.duckdb.connect", return_value=connection):
+        eligible = _expiring_snapshots(configuration, "lake")
+
+    assert eligible == 4
+    queries = [call.args[0] for call in connection.execute.call_args_list]
+    expiration = next(
+        query for query in queries if "ducklake_expire_snapshots" in query
+    )
+    assert "dry_run => true" in expiration
+    assert "older_than" not in expiration
+    assert "versions" not in expiration
+    assert not any("DETACH" in query for query in queries)
+
+
+def test_orphan_probe_uses_storage_and_never_overrides_native_retention() -> None:
+    connection = Mock()
+    result = Mock()
+    result.fetchone.return_value = (9,)
+    connection.execute.side_effect = [
+        connection,
+        connection,
+        connection,
+        connection,
+        connection,
+        connection,
+        result,
+    ]
+    configuration = MetadataConfiguration(
+        backend_hint="postgres",
+        host="catalog.example",
+        port=5432,
+        username="user",
+        password="password",
+        database="lake",
+    )
+    storage = StorageConfiguration(
+        provider="filesystem",
+        data_path="/var/lib/lakes/",
+    )
+
+    with patch("lakeducktor.inventory.duckdb.connect", return_value=connection):
+        eligible = _orphan_files(configuration, storage, "lake")
+
+    assert eligible == 9
+    queries = [call.args[0] for call in connection.execute.call_args_list]
+    attach = next(query for query in queries if "ATTACH" in query)
+    orphan = next(
+        query for query in queries if "ducklake_delete_orphaned_files" in query
+    )
+    assert "DATA_PATH '/var/lib/lakes/'" in attach
+    assert "OVERRIDE_DATA_PATH true" in attach
+    assert "READ_ONLY" not in attach
+    assert "dry_run => true" in orphan
+    assert "older_than" not in orphan
+    assert not any("DETACH" in query for query in queries)
+
+
+def test_maintenance_inventory_caches_orphan_scan_until_interval_or_cleanup() -> None:
+    storage = StorageConfiguration(provider="filesystem", data_path="/lakes/")
+    detection = BackendDetection(
+        backend=MetadataBackend.POSTGRES,
+        metadata_schemas=("lake",),
+        extension_version="v1",
+        duckdb_extensions=(),
+    )
+    now = [100.0]
+    probes: list[frozenset[str] | None] = []
+
+    def collect(
+        _configuration,
+        _detection,
+        _storage,
+        *,
+        orphan_probe_schemas,
+    ) -> CatalogInventory:
+        probes.append(orphan_probe_schemas)
+        return CatalogInventory(
+            lakes=(
+                LakeInventory(
+                    metadata_schema="lake",
+                    latest_snapshot_id=1,
+                    latest_snapshot_at=None,
+                    scheduled_files=0,
+                    oldest_scheduled_at=None,
+                    tables=(),
+                    orphan_files=5 if "lake" in orphan_probe_schemas else 0,
+                ),
+            )
+        )
+
+    collector = MaintenanceInventory(
+        storage,
+        orphan_scan_interval_seconds=3_600,
+        clock=lambda: now[0],
+    )
+    configuration = Mock()
+    with patch("lakeducktor.inventory.inventory_catalog", side_effect=collect):
+        assert collector(configuration, detection).lakes[0].orphan_files == 5
+        assert collector(configuration, detection).lakes[0].orphan_files == 5
+        collector.treatment_completed(
+            TreatmentSelection(
+                kind=TreatmentKind.ORPHAN_FILE_CLEANUP,
+                priority_rank=1,
+                metadata_schema="lake",
+                table_id=None,
+                schema_name=None,
+                table_name=None,
+                input_bytes=0,
+                admitted_bytes=0,
+                sorting_enabled=False,
+                memory_headroom_bytes=0,
+                usable_memory_bytes=1,
+                max_compacted_files=None,
+            ),
+            TreatmentResult(5, 0),
+        )
+        assert collector(configuration, detection).lakes[0].orphan_files == 0
+        now[0] += 3_600
+        assert collector(configuration, detection).lakes[0].orphan_files == 5
+
+    assert probes == [
+        frozenset({"lake"}),
+        frozenset(),
+        frozenset(),
+        frozenset({"lake"}),
+    ]

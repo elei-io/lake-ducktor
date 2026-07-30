@@ -19,7 +19,7 @@ from lakeducktor.config import (
 from lakeducktor.coordination import PostgresTreatmentCoordinator
 from lakeducktor.daemon import MaintenanceError, RunError, maintain_once, run_service
 from lakeducktor.diagnosis import DiagnosisError, diagnose_inventory
-from lakeducktor.inventory import InventoryError, inventory_catalog
+from lakeducktor.inventory import InventoryError, MaintenanceInventory
 from lakeducktor.lake import BackendDetectionError, detect_metadata_backend
 from lakeducktor.model import MaintenanceState, MetadataBackend
 from lakeducktor.priority import PriorityError, prioritize
@@ -92,7 +92,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         storage = (
             StorageConfiguration.from_environment()
-            if arguments.command in {"maintain", "run"}
+            if arguments.command
+            in {"inventory", "diagnose", "prioritize", "select", "maintain", "run"}
             else None
         )
         if arguments.command == "run":
@@ -129,8 +130,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "select",
         "maintain",
     }:
+        assert storage is not None
+        maintenance_inventory = MaintenanceInventory(storage)
         try:
-            inventory = inventory_catalog(configuration, detection)
+            inventory = maintenance_inventory(configuration, detection)
         except InventoryError as error:
             _LOGGER.error("inventory_failed error=%s", error)
             return 1
@@ -141,7 +144,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "active_delete_files=%s active_delete_bytes=%s "
                 "inlined_data_rows=%s inlined_data_bytes=%s "
                 "dangling_delete_files=%s scheduled_files=%s "
-                "cleanup_eligible_files=%s delete_older_than=%s "
+                "expiring_snapshots=%s cleanup_eligible_files=%s "
+                "orphan_files=%s delete_older_than=%s "
                 "expire_older_than=%s",
                 lake.metadata_schema,
                 lake.latest_snapshot_id
@@ -156,7 +160,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sum(table.inlined_data_bytes for table in lake.tables),
                 lake.dangling_delete_files,
                 lake.scheduled_files,
+                getattr(lake, "expiring_snapshots", 0),
                 getattr(lake, "cleanup_eligible_files", 0),
+                getattr(lake, "orphan_files", 0),
                 getattr(lake, "delete_older_than", None) or "native_default",
                 getattr(lake, "expire_older_than", None) or "unset",
             )
@@ -171,6 +177,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "diagnosis lake=%s state=%s actionable_tables=%s "
                     "excluded_tables=%s attention_tables=%s "
                     "scheduled_files=%s cleanup_eligible_files=%s "
+                    "expiring_snapshots=%s orphan_files=%s "
                     "delete_older_than=%s expire_older_than=%s",
                     lake.metadata_schema,
                     lake.state.value,
@@ -179,6 +186,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     lake.attention_tables,
                     lake.scheduled_files,
                     getattr(lake, "cleanup_eligible_files", 0),
+                    getattr(lake, "expiring_snapshots", 0),
+                    getattr(lake, "orphan_files", 0),
                     getattr(lake, "delete_older_than", None) or "native_default",
                     getattr(lake, "expire_older_than", None) or "unset",
                 )
@@ -223,6 +232,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _LOGGER.error("priority_failed error=%s", error)
                     return 1
                 if arguments.command == "prioritize":
+                    for candidate in getattr(plan, "snapshot_expirations", ()):
+                        _LOGGER.info(
+                            "priority kind=snapshot_expiration rank=%s "
+                            "lake=%s state=runnable snapshots=%s "
+                            "retention_policy=%s",
+                            candidate.rank,
+                            candidate.metadata_schema,
+                            candidate.snapshots,
+                            candidate.expire_older_than,
+                        )
                     for candidate in plan.scheduled_file_cleanups:
                         _LOGGER.info(
                             "priority kind=scheduled_file_cleanup rank=%s "
@@ -236,6 +255,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                             candidate.oldest_scheduled_at.isoformat()
                             if candidate.oldest_scheduled_at is not None
                             else "none",
+                            candidate.delete_older_than or "native_default",
+                        )
+                    for candidate in getattr(plan, "orphan_file_cleanups", ()):
+                        _LOGGER.info(
+                            "priority kind=orphan_file_cleanup rank=%s "
+                            "lake=%s state=runnable orphan_files=%s "
+                            "retention_policy=%s",
+                            candidate.rank,
+                            candidate.metadata_schema,
+                            candidate.orphan_files,
                             candidate.delete_older_than or "native_default",
                         )
                     for candidate in plan.inline_flushes:
@@ -307,11 +336,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                             candidate.adjusted_expected_files_eliminated,
                         )
                     _LOGGER.info(
-                        "priority_summary scheduled_file_cleanups=%s "
+                        "priority_summary snapshot_expirations=%s "
+                        "scheduled_file_cleanups=%s orphan_file_cleanups=%s "
                         "inline_flushes=%s "
                         "delete_rewrites=%s merges=%s "
                         "runnable=%s blocked=%s excluded=%s attention=%s",
+                        len(getattr(plan, "snapshot_expirations", ())),
                         len(plan.scheduled_file_cleanups),
+                        len(getattr(plan, "orphan_file_cleanups", ())),
                         len(plan.inline_flushes),
                         len(plan.delete_rewrites),
                         len(plan.merges),
@@ -346,7 +378,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             _LOGGER.info(
                                 "selected treatment=%s priority_rank=%s lake=%s "
                                 "table_id=%s schema=%r table=%r input_bytes=%s "
-                                "input_rows=%s "
+                                "input_rows=%s input_snapshots=%s "
                                 "admitted_bytes=%s sorting_enabled=%s "
                                 "memory_headroom_bytes=%s "
                                 "usable_memory_bytes=%s max_compacted_files=%s "
@@ -360,6 +392,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 selected.table_name,
                                 selected.input_bytes,
                                 selected.input_rows,
+                                selected.input_snapshots,
                                 selected.admitted_bytes,
                                 str(selected.sorting_enabled).lower(),
                                 selected.memory_headroom_bytes,
@@ -389,6 +422,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 envelope,
                                 plan,
                                 PostgresTreatmentCoordinator(configuration),
+                                inventory=maintenance_inventory,
                             )
                         except MaintenanceError as error:
                             _LOGGER.error("maintenance_failed error=%s", error)
@@ -419,7 +453,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             _LOGGER.info(
                                 "treatment_completed kind=%s lake=%s table_id=%s "
                                 "files_processed=%s files_created=%s "
-                                "rows_processed=%s "
+                                "rows_processed=%s snapshots_processed=%s "
                                 "duration_seconds=%.3f sorting_enabled=%s "
                                 "table_present=%s "
                                 "still_actionable=%s claim_contention=%s",
@@ -429,6 +463,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 outcome.result.files_processed,
                                 outcome.result.files_created,
                                 outcome.result.rows_processed,
+                                outcome.result.snapshots_processed,
                                 outcome.duration_seconds,
                                 str(outcome.selection.sorting_enabled).lower(),
                                 str(outcome.table_present).lower(),

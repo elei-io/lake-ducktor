@@ -127,6 +127,7 @@ def test_run_configuration_defaults_are_boring() -> None:
     assert configuration.metrics_port == 8_000
     assert configuration.conflict_backoff_base_seconds == 5
     assert configuration.conflict_backoff_max_seconds == 60
+    assert configuration.orphan_scan_interval_seconds == 3_600
 
 
 def test_run_configuration_accepts_operational_overrides() -> None:
@@ -138,6 +139,7 @@ def test_run_configuration_accepts_operational_overrides() -> None:
             "METRICS_PORT": "9090",
             "CONFLICT_BACKOFF_BASE_SECONDS": "3",
             "CONFLICT_BACKOFF_MAX_SECONDS": "30",
+            "ORPHAN_SCAN_INTERVAL_SECONDS": "1800",
         }
     )
 
@@ -147,6 +149,7 @@ def test_run_configuration_accepts_operational_overrides() -> None:
     assert configuration.metrics_port == 9_090
     assert configuration.conflict_backoff_base_seconds == 3
     assert configuration.conflict_backoff_max_seconds == 30
+    assert configuration.orphan_scan_interval_seconds == 1_800
 
 
 @pytest.mark.parametrize(
@@ -159,6 +162,7 @@ def test_run_configuration_accepts_operational_overrides() -> None:
         ("METRICS_PORT", "65536"),
         ("CONFLICT_BACKOFF_BASE_SECONDS", "0"),
         ("CONFLICT_BACKOFF_MAX_SECONDS", "nan"),
+        ("ORPHAN_SCAN_INTERVAL_SECONDS", "0"),
     ],
 )
 def test_invalid_run_configuration_is_rejected(name: str, value: str) -> None:

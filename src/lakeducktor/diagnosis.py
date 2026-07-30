@@ -119,7 +119,12 @@ def diagnose_inventory(inventory: CatalogInventory) -> CatalogDiagnosis:
     for lake in inventory.lakes:
         tables = tuple(diagnose_table(table) for table in lake.tables)
         states = {table.state for table in tables}
-        if lake.cleanup_eligible_files or DiagnosisState.ACTIONABLE in states:
+        if (
+            lake.expiring_snapshots
+            or lake.cleanup_eligible_files
+            or lake.orphan_files
+            or DiagnosisState.ACTIONABLE in states
+        ):
             state = DiagnosisState.ACTIONABLE
         elif lake.scheduled_files or DiagnosisState.ATTENTION in states:
             state = DiagnosisState.ATTENTION
@@ -133,7 +138,9 @@ def diagnose_inventory(inventory: CatalogInventory) -> CatalogDiagnosis:
                 state=state,
                 scheduled_files=lake.scheduled_files,
                 tables=tables,
+                expiring_snapshots=lake.expiring_snapshots,
                 cleanup_eligible_files=lake.cleanup_eligible_files,
+                orphan_files=lake.orphan_files,
                 oldest_scheduled_at=lake.oldest_scheduled_at,
                 delete_older_than=lake.delete_older_than,
                 expire_older_than=lake.expire_older_than,

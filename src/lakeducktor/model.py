@@ -27,7 +27,9 @@ class DiagnosisState(StrEnum):
 
 
 class TreatmentKind(StrEnum):
+    SNAPSHOT_EXPIRATION = "snapshot_expiration"
     SCHEDULED_FILE_CLEANUP = "scheduled_file_cleanup"
+    ORPHAN_FILE_CLEANUP = "orphan_file_cleanup"
     INLINE_FLUSH = "inline_flush"
     DELETE_REWRITE = "delete_rewrite"
     MERGE = "merge"
@@ -131,7 +133,9 @@ class LakeInventory:
     scheduled_files: int
     oldest_scheduled_at: datetime | None
     tables: tuple[TableInventory, ...]
+    expiring_snapshots: int = 0
     cleanup_eligible_files: int = 0
+    orphan_files: int = 0
     delete_older_than: str | None = None
     expire_older_than: str | None = None
 
@@ -224,7 +228,9 @@ class LakeDiagnosis:
     state: DiagnosisState
     scheduled_files: int
     tables: tuple[TableDiagnosis, ...]
+    expiring_snapshots: int = 0
     cleanup_eligible_files: int = 0
+    orphan_files: int = 0
     oldest_scheduled_at: datetime | None = None
     delete_older_than: str | None = None
     expire_older_than: str | None = None
@@ -311,6 +317,22 @@ class ScheduledFileCleanupPriority:
 
 
 @dataclass(frozen=True, slots=True)
+class SnapshotExpirationPriority:
+    rank: int
+    metadata_schema: str
+    snapshots: int
+    expire_older_than: str
+
+
+@dataclass(frozen=True, slots=True)
+class OrphanFileCleanupPriority:
+    rank: int
+    metadata_schema: str
+    orphan_files: int
+    delete_older_than: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class PriorityPlan:
     delete_rewrites: tuple[DeleteRewritePriority, ...]
     merges: tuple[MergePriority, ...]
@@ -318,11 +340,15 @@ class PriorityPlan:
     attention_tables: int
     inline_flushes: tuple[InlineFlushPriority, ...] = ()
     scheduled_file_cleanups: tuple[ScheduledFileCleanupPriority, ...] = ()
+    snapshot_expirations: tuple[SnapshotExpirationPriority, ...] = ()
+    orphan_file_cleanups: tuple[OrphanFileCleanupPriority, ...] = ()
 
     @property
     def runnable(self) -> int:
         return (
-            len(self.scheduled_file_cleanups)
+            len(self.snapshot_expirations)
+            + len(self.scheduled_file_cleanups)
+            + len(self.orphan_file_cleanups)
             + len(self.inline_flushes)
             + len(self.delete_rewrites)
             + sum(
@@ -362,6 +388,7 @@ class TreatmentSelection:
     lake_target_file_size_bytes: int | None = None
     execution_target_file_size_bytes: int | None = None
     input_rows: int = 0
+    input_snapshots: int = 0
     retention_policy: str | None = None
 
 
@@ -378,6 +405,7 @@ class TreatmentResult:
     files_processed: int
     files_created: int
     rows_processed: int = 0
+    snapshots_processed: int = 0
 
 
 @dataclass(frozen=True, slots=True)

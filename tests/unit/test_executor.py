@@ -163,6 +163,43 @@ def test_scheduled_cleanup_uses_native_policy_without_overrides() -> None:
     assert result.files_created == 0
 
 
+def test_snapshot_expiration_uses_native_policy_without_overrides() -> None:
+    connection = FakeConnection(rows=[(4,)])
+    chosen = replace(
+        selection(TreatmentKind.SNAPSHOT_EXPIRATION, max_compacted_files=None),
+        table_id=None,
+        schema_name=None,
+        table_name=None,
+    )
+
+    result = execute_native_treatment(connection, chosen)
+
+    assert "ducklake_expire_snapshots" in connection.query
+    assert "older_than" not in connection.query
+    assert "versions" not in connection.query
+    assert connection.parameters == ["lakeducktor_treatment"]
+    assert result.snapshots_processed == 4
+    assert result.files_processed == 0
+
+
+def test_orphan_cleanup_uses_native_policy_without_overrides() -> None:
+    connection = FakeConnection(rows=[(9,)])
+    chosen = replace(
+        selection(TreatmentKind.ORPHAN_FILE_CLEANUP, max_compacted_files=None),
+        table_id=None,
+        schema_name=None,
+        table_name=None,
+    )
+
+    result = execute_native_treatment(connection, chosen)
+
+    assert "ducklake_delete_orphaned_files" in connection.query
+    assert "older_than" not in connection.query
+    assert connection.parameters == ["lakeducktor_treatment"]
+    assert result.files_processed == 9
+    assert result.files_created == 0
+
+
 def test_merge_requires_native_batch_bound() -> None:
     with pytest.raises(ExecutionError, match="max_compacted_files"):
         execute_native_treatment(

@@ -1,6 +1,8 @@
 import logging
 from types import SimpleNamespace
 
+import pytest
+
 from lakeducktor import __version__
 from lakeducktor.cli import main
 from lakeducktor.model import (
@@ -31,6 +33,14 @@ _EXTENSIONS = (
         source="core",
     ),
 )
+
+
+@pytest.fixture(autouse=True)
+def storage_configuration(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "lakeducktor.cli.StorageConfiguration.from_environment",
+        lambda: object(),
+    )
 
 
 def test_entry_point_reports_detected_backend(
@@ -118,34 +128,36 @@ def test_inventory_command_logs_aggregate_physical_facts(
         lambda _configuration: detection,
     )
     monkeypatch.setattr(
-        "lakeducktor.cli.inventory_catalog",
-        lambda _configuration, _detection: SimpleNamespace(
-            lakes=(
-                SimpleNamespace(
-                    metadata_schema="lake_a",
-                    latest_snapshot_id=11,
-                    table_count=4,
-                    active_data_files=12,
-                    active_data_bytes=1_024,
-                    active_delete_files=3,
-                    active_delete_bytes=128,
-                    tables=(),
-                    dangling_delete_files=1,
-                    scheduled_files=2,
+        "lakeducktor.cli.MaintenanceInventory",
+        lambda _storage: (
+            lambda _configuration, _detection: SimpleNamespace(
+                lakes=(
+                    SimpleNamespace(
+                        metadata_schema="lake_a",
+                        latest_snapshot_id=11,
+                        table_count=4,
+                        active_data_files=12,
+                        active_data_bytes=1_024,
+                        active_delete_files=3,
+                        active_delete_bytes=128,
+                        tables=(),
+                        dangling_delete_files=1,
+                        scheduled_files=2,
+                    ),
+                    SimpleNamespace(
+                        metadata_schema="lake_b",
+                        latest_snapshot_id=None,
+                        table_count=0,
+                        active_data_files=0,
+                        active_data_bytes=0,
+                        active_delete_files=0,
+                        active_delete_bytes=0,
+                        tables=(),
+                        dangling_delete_files=0,
+                        scheduled_files=0,
+                    ),
                 ),
-                SimpleNamespace(
-                    metadata_schema="lake_b",
-                    latest_snapshot_id=None,
-                    table_count=0,
-                    active_data_files=0,
-                    active_data_bytes=0,
-                    active_delete_files=0,
-                    active_delete_bytes=0,
-                    tables=(),
-                    dangling_delete_files=0,
-                    scheduled_files=0,
-                ),
-            ),
+            )
         ),
     )
 
@@ -157,7 +169,8 @@ def test_inventory_command_logs_aggregate_physical_facts(
         "detected lake=lake_a snapshot=11 tables=4 active_data_files=12 "
         "active_data_bytes=1024 active_delete_files=3 active_delete_bytes=128 "
         "inlined_data_rows=0 inlined_data_bytes=0 "
-        "dangling_delete_files=1 scheduled_files=2 cleanup_eligible_files=0 "
+        "dangling_delete_files=1 scheduled_files=2 expiring_snapshots=0 "
+        "cleanup_eligible_files=0 orphan_files=0 "
         "delete_older_than=native_default expire_older_than=unset"
     ) in [record.getMessage() for record in caplog.records]
 
@@ -195,8 +208,10 @@ def test_diagnose_command_logs_lake_and_table_explanations(
         scheduled_files=0,
     )
     monkeypatch.setattr(
-        "lakeducktor.cli.inventory_catalog",
-        lambda _configuration, _detection: SimpleNamespace(lakes=(inventory_lake,)),
+        "lakeducktor.cli.MaintenanceInventory",
+        lambda _storage: lambda _configuration, _detection: SimpleNamespace(
+            lakes=(inventory_lake,)
+        ),
     )
     table_diagnosis = SimpleNamespace(
         metadata_schema="lake_a",
@@ -245,7 +260,8 @@ def test_diagnose_command_logs_lake_and_table_explanations(
     assert (
         "diagnosis lake=lake_a state=actionable actionable_tables=1 "
         "excluded_tables=0 attention_tables=0 scheduled_files=0 "
-        "cleanup_eligible_files=0 delete_older_than=native_default "
+        "cleanup_eligible_files=0 expiring_snapshots=0 orphan_files=0 "
+        "delete_older_than=native_default "
         "expire_older_than=unset"
     ) in messages
     assert any(
@@ -290,8 +306,10 @@ def test_prioritize_command_logs_separate_treatment_lanes(
         scheduled_files=0,
     )
     monkeypatch.setattr(
-        "lakeducktor.cli.inventory_catalog",
-        lambda _configuration, _detection: SimpleNamespace(lakes=(inventory_lake,)),
+        "lakeducktor.cli.MaintenanceInventory",
+        lambda _storage: lambda _configuration, _detection: SimpleNamespace(
+            lakes=(inventory_lake,)
+        ),
     )
     monkeypatch.setattr(
         "lakeducktor.cli.diagnose_inventory",
@@ -363,7 +381,8 @@ def test_prioritize_command_logs_separate_treatment_lanes(
         for message in messages
     )
     assert (
-        "priority_summary scheduled_file_cleanups=0 inline_flushes=0 "
+        "priority_summary snapshot_expirations=0 scheduled_file_cleanups=0 "
+        "orphan_file_cleanups=0 inline_flushes=0 "
         "delete_rewrites=1 merges=1 "
         "runnable=1 blocked=1 "
         "excluded=0 attention=0"
@@ -403,8 +422,10 @@ def test_select_command_logs_resource_envelope_and_one_treatment(
         scheduled_files=0,
     )
     monkeypatch.setattr(
-        "lakeducktor.cli.inventory_catalog",
-        lambda _configuration, _detection: SimpleNamespace(lakes=(inventory_lake,)),
+        "lakeducktor.cli.MaintenanceInventory",
+        lambda _storage: lambda _configuration, _detection: SimpleNamespace(
+            lakes=(inventory_lake,)
+        ),
     )
     monkeypatch.setattr(
         "lakeducktor.cli.diagnose_inventory",
@@ -451,6 +472,7 @@ def test_select_command_logs_resource_envelope_and_one_treatment(
     assert (
         "selected treatment=merge priority_rank=1 lake=lake_a table_id=7 "
         "schema='main' table='events' input_bytes=1000 input_rows=0 "
+        "input_snapshots=0 "
         "admitted_bytes=512 "
         "sorting_enabled=false memory_headroom_bytes=1000000000 "
         "usable_memory_bytes=3000000000 "
@@ -502,8 +524,10 @@ def test_maintain_command_logs_verified_treatment_outcome(
         scheduled_files=0,
     )
     monkeypatch.setattr(
-        "lakeducktor.cli.inventory_catalog",
-        lambda _configuration, _detection: SimpleNamespace(lakes=(inventory_lake,)),
+        "lakeducktor.cli.MaintenanceInventory",
+        lambda _storage: lambda _configuration, _detection: SimpleNamespace(
+            lakes=(inventory_lake,)
+        ),
     )
     monkeypatch.setattr(
         "lakeducktor.cli.diagnose_inventory",
@@ -532,7 +556,7 @@ def test_maintain_command_logs_verified_treatment_outcome(
     )
     monkeypatch.setattr(
         "lakeducktor.cli.maintain_once",
-        lambda *_arguments: MaintenanceOutcome(
+        lambda *_arguments, **_keywords: MaintenanceOutcome(
             state=MaintenanceState.COMPLETED,
             selection=selected,
             result=TreatmentResult(files_processed=4, files_created=1),
@@ -551,6 +575,7 @@ def test_maintain_command_logs_verified_treatment_outcome(
     assert (
         "treatment_completed kind=merge lake=lake_a table_id=7 "
         "files_processed=4 files_created=1 rows_processed=0 "
+        "snapshots_processed=0 "
         "duration_seconds=12.500 "
         "sorting_enabled=false "
         "table_present=true still_actionable=false claim_contention=1"

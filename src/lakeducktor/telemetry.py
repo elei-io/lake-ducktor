@@ -181,6 +181,12 @@ class WorkerTelemetry:
             ("kind",),
             registry=self.registry,
         )
+        self._snapshots_processed = Counter(
+            "lakeducktor_treatment_snapshots_processed_total",
+            "Snapshots expired by successful native treatments.",
+            ("kind",),
+            registry=self.registry,
+        )
         self._files_eliminated = Counter(
             "lakeducktor_treatment_files_eliminated_total",
             "Net files eliminated by successful native treatments.",
@@ -269,6 +275,16 @@ class WorkerTelemetry:
             "Scheduled files currently eligible under native DuckLake policy.",
             registry=self.registry,
         )
+        self._expiring_snapshots = Gauge(
+            "lakeducktor_expiring_snapshots",
+            "Snapshots currently eligible under native DuckLake policy.",
+            registry=self.registry,
+        )
+        self._orphan_files = Gauge(
+            "lakeducktor_orphan_files",
+            "Orphan files found by the latest storage scan.",
+            registry=self.registry,
+        )
         self._dangling_delete_files = Gauge(
             "lakeducktor_dangling_delete_files",
             "Active delete files whose data file is no longer active.",
@@ -282,6 +298,7 @@ class WorkerTelemetry:
             self._files_created.labels(kind=kind.value)
             self._files_eliminated.labels(kind=kind.value)
             self._rows_processed.labels(kind=kind.value)
+            self._snapshots_processed.labels(kind=kind.value)
         self._set_health_metrics(self.health_snapshot())
 
     @property
@@ -322,6 +339,12 @@ class WorkerTelemetry:
         self._scheduled_files.set(inventory.scheduled_files)
         self._cleanup_eligible_files.set(
             sum(getattr(lake, "cleanup_eligible_files", 0) for lake in inventory.lakes)
+        )
+        self._expiring_snapshots.set(
+            sum(getattr(lake, "expiring_snapshots", 0) for lake in inventory.lakes)
+        )
+        self._orphan_files.set(
+            sum(getattr(lake, "orphan_files", 0) for lake in inventory.lakes)
         )
         self._dangling_delete_files.set(
             sum(lake.dangling_delete_files for lake in inventory.lakes)
@@ -376,6 +399,9 @@ class WorkerTelemetry:
             )
             self._rows_processed.labels(kind=selection.kind.value).inc(
                 result.rows_processed
+            )
+            self._snapshots_processed.labels(kind=selection.kind.value).inc(
+                result.snapshots_processed
             )
         with self._lock:
             self._phase = WorkerPhase.CYCLING

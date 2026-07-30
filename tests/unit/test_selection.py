@@ -6,11 +6,13 @@ from lakeducktor.model import (
     DeleteRewritePriority,
     InlineFlushPriority,
     MergePriority,
+    OrphanFileCleanupPriority,
     PriorityPlan,
     PriorityState,
     ResourceEnvelope,
     ScheduledFileCleanupPriority,
     SelectionReason,
+    SnapshotExpirationPriority,
     TreatmentKind,
 )
 from lakeducktor.selection import (
@@ -94,7 +96,9 @@ def flush(rank: int, table_id: int, input_bytes: int) -> InlineFlushPriority:
 
 def plan(
     *,
+    expirations: tuple[SnapshotExpirationPriority, ...] = (),
     cleanups: tuple[ScheduledFileCleanupPriority, ...] = (),
+    orphans: tuple[OrphanFileCleanupPriority, ...] = (),
     flushes: tuple[InlineFlushPriority, ...] = (),
     rewrites: tuple[DeleteRewritePriority, ...] = (),
     merges: tuple[MergePriority, ...] = (),
@@ -106,6 +110,8 @@ def plan(
         attention_tables=0,
         inline_flushes=flushes,
         scheduled_file_cleanups=cleanups,
+        snapshot_expirations=expirations,
+        orphan_file_cleanups=orphans,
     )
 
 
@@ -130,6 +136,36 @@ def test_native_policy_cleanup_is_selected_without_memory_admission() -> None:
     assert decision.selected.input_files == 7
     assert decision.selected.retention_policy == "native_default"
     assert decision.memory_deferred == 1
+
+
+def test_lake_housekeeping_uses_native_policy_and_fixed_order() -> None:
+    expiration = SnapshotExpirationPriority(
+        rank=1,
+        metadata_schema="lake",
+        snapshots=4,
+        expire_older_than="1 week",
+    )
+    orphan = OrphanFileCleanupPriority(
+        rank=1,
+        metadata_schema="lake",
+        orphan_files=9,
+        delete_older_than=None,
+    )
+
+    first = select_treatment(
+        plan(expirations=(expiration,), orphans=(orphan,)),
+        _ENVELOPE,
+    ).selected
+    assert first is not None
+    assert first.kind is TreatmentKind.SNAPSHOT_EXPIRATION
+    assert first.input_snapshots == 4
+    assert first.retention_policy == "1 week"
+
+    second = select_treatment(plan(orphans=(orphan,)), _ENVELOPE).selected
+    assert second is not None
+    assert second.kind is TreatmentKind.ORPHAN_FILE_CLEANUP
+    assert second.input_files == 9
+    assert second.retention_policy == "native_default"
 
 
 def test_first_fitting_rewrite_is_selected_before_merge_lane() -> None:

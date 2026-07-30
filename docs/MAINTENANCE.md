@@ -7,8 +7,9 @@ plan.
 
 DuckBasin exercised file merging and delete-heavy file rewriting. It did not
 establish equivalent experience for snapshot expiration, obsolete-file
-cleanup, orphan removal, or flushing inlined data. LakeDucktor therefore keeps
-its inline-flush rule deliberately small and derived from DuckLake state.
+cleanup, orphan removal, or flushing inlined data. LakeDucktor therefore
+delegates those lifecycles to DuckLake's native operations and stored policy
+rather than generalizing DuckBasin's compaction choices.
 
 ## Ground truth and derived state
 
@@ -227,10 +228,10 @@ assuming a scoring heuristic provides it.
 ### Select one treatment
 
 Each worker has a fixed `DUCKDB_THREADS` and `DUCKDB_MEMORY` envelope and
-selects at most one treatment. Selection scans native-policy scheduled-file
-cleanup, then the ranked delete-rewrite lane, the inline-flush lane, and the
-ranked runnable-merge lane. It does not manufacture a score that compares
-unlike treatments.
+selects at most one treatment. Selection scans lake-scoped snapshot expiration,
+scheduled-file cleanup, and orphan cleanup before the ranked delete-rewrite,
+inline-flush, and runnable-merge lanes. It does not manufacture a score that
+compares unlike treatments.
 
 Scheduled-file cleanup delegates eligibility to DuckLake and needs no DuckDB
 memory admission. A delete rewrite is admitted only when the complete active
@@ -286,13 +287,27 @@ context with the configured memory and threads:
 - inline flushes call DuckLake's table-scoped `ducklake_flush_inlined_data` and
   report the returned flushed-row count and the observed active-file increase
   around the flush.
+- snapshot expiration, obsolete-file cleanup, and orphan cleanup call their
+  native lake-scoped functions without supplying a retention override.
 
 DuckLake chooses the current eligible files and owns the metadata and object
 storage changes. LakeDucktor records the returned processed/created file
 counts, diagnoses the table once more, and releases the claim. A successful
 bounded treatment may remain actionable for the next invocation.
 
-### Clean up scheduled files
+### Run lake lifecycle maintenance
+
+Snapshot expiration is diagnosed with:
+
+```sql
+FROM ducklake_expire_snapshots('lakeducktor_expiration_probe', dry_run => true);
+```
+
+LakeDucktor supplies neither `older_than` nor `versions`. DuckLake therefore
+uses the lake's persisted global `expire_older_than`; when that policy is
+unset, there is no expiration candidate. Treatment repeats the dry run after
+claiming and invokes `ducklake_expire_snapshots` with no override. The number
+of expired snapshots is reported separately from processed files.
 
 Scheduled-file cleanup is a lake-scoped lifecycle, not a table treatment.
 Compaction and snapshot expiry deliberately schedule obsolete objects instead
@@ -319,9 +334,28 @@ reports deleted files, current eligible files, and the stored policy source.
 Because the native function has no file-count bound, health and stuck-treatment
 signals remain important for unusually large or slow object-store cleanups.
 
-Orphan cleanup is a separate, more dangerous operation. Untracked objects are
-not equivalent to files DuckLake explicitly scheduled for deletion and must
-not share this treatment lane.
+Orphan cleanup remains a separate treatment lane. Inventory calls
+`ducklake_delete_orphaned_files(..., dry_run => true)` with the configured
+storage credentials and data-path override. DuckLake currently rejects this
+dry run on a read-only attachment, so the probe uses a writable attachment
+while keeping `dry_run` explicit, disabling checkpoint-on-shutdown, never
+detaching, and issuing no mutation.
+
+The storage walk is materially more expensive than metadata inventory.
+Long-lived workers therefore scan for orphans at startup and every
+`ORPHAN_SCAN_INTERVAL_SECONDS` (one hour by default), caching only the latest
+derived count in process memory. A restart safely forgets that cache. A
+positive scan becomes a lake-scoped candidate, is revalidated from the cached
+observation under the lake claim, and invokes:
+
+```sql
+CALL ducklake_delete_orphaned_files('lakeducktor_treatment');
+```
+
+No explicit `older_than` is supplied, so DuckLake resolves the persisted
+global `delete_older_than` or its native default. Successful cleanup reduces
+the cached debt immediately; the next periodic scan reconstructs it from
+storage. Orphans are never treated as scheduled obsolete files.
 
 Merge treatment is incremental. LakeDucktor never mutates the lake's persisted
 `target_file_size`; when the smallest eligible inputs would make one native
@@ -465,7 +499,8 @@ It also relied on PostgreSQL-specific coordination and a CDC trigger. Those
 choices provide evidence for recoverable ownership and efficient discovery,
 but not for a portable LakeDucktor architecture.
 
-The remaining maintenance operations have additional safety questions:
+The lake lifecycle operations have additional evidence needs even though they
+are now automated through native policy:
 
 - snapshot expiration changes available history;
 - obsolete-file cleanup must respect active readers and configured age;

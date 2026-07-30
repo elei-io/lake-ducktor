@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from dataclasses import replace
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Protocol
 
 import duckdb
 
-from lakeducktor.config import MetadataConfiguration
+from lakeducktor.config import MetadataConfiguration, StorageConfiguration
 from lakeducktor.duckdb_config import connection_config
 from lakeducktor.model import (
     BackendDetection,
@@ -19,10 +20,16 @@ from lakeducktor.model import (
     LakeInventory,
     MetadataBackend,
     TableInventory,
+    TreatmentKind,
+    TreatmentResult,
+    TreatmentSelection,
 )
 
 _INVENTORY_ALIAS = "lakeducktor_inventory"
 _CLEANUP_PROBE_ALIAS = "lakeducktor_cleanup_probe"
+_EXPIRATION_PROBE_ALIAS = "lakeducktor_expiration_probe"
+_ORPHAN_PROBE_ALIAS = "lakeducktor_orphan_probe"
+_PROBE_STORAGE_SECRET = "lakeducktor_probe_storage"
 
 type LakeSummaryRow = tuple[
     int | None,
@@ -705,52 +712,142 @@ def collect_inventory(
     return CatalogInventory(lakes=tuple(lakes))
 
 
-def _cleanup_eligible_files(
+def _native_dry_run_count(
     configuration: MetadataConfiguration,
     metadata_schema: str,
+    *,
+    alias: str,
+    function: str,
+    diagnosis: str,
+    storage: StorageConfiguration | None = None,
+    read_only: bool = True,
 ) -> int:
-    """Ask DuckLake to resolve its own persisted/default cleanup policy."""
-
     connection = duckdb.connect(
         database=":memory:",
         config=connection_config({"threads": "1"}),
     )
     try:
         connection.execute("PRAGMA disable_checkpoint_on_shutdown")
-        for extension in ("postgres", "ducklake"):
+        extensions = (
+            ("httpfs", "postgres", "ducklake")
+            if storage is not None and storage.provider == "s3-compatible"
+            else ("postgres", "ducklake")
+        )
+        for extension in extensions:
             connection.execute(f"INSTALL {extension}")
             connection.execute(f"LOAD {extension}")
+        if storage is not None and storage.provider == "s3-compatible":
+            connection.execute(
+                f"""
+                CREATE SECRET {_PROBE_STORAGE_SECRET} (
+                    TYPE s3,
+                    KEY_ID ?,
+                    SECRET ?,
+                    REGION ?,
+                    ENDPOINT ?,
+                    URL_STYLE 'path',
+                    USE_SSL ?,
+                    SCOPE ?
+                )
+                """,
+                [
+                    storage.access_key_id,
+                    storage.secret_access_key,
+                    storage.region,
+                    storage.endpoint,
+                    storage.use_ssl,
+                    f"s3://{storage.bucket}",
+                ],
+            )
         uri = configuration.postgres_uri().replace("'", "''")
         schema = metadata_schema.replace("'", "''")
+        options = [f"METADATA_SCHEMA '{schema}'", "CREATE_IF_NOT_EXISTS false"]
+        if read_only:
+            options.append("READ_ONLY")
+        if storage is not None and storage.provider == "filesystem":
+            if storage.data_path is None:
+                raise InventoryError("filesystem storage is missing its data path")
+            data_path = storage.data_path.replace("'", "''")
+            options.extend(
+                (f"DATA_PATH '{data_path}'", "OVERRIDE_DATA_PATH true")
+            )
         connection.execute(
             f"""
-            ATTACH 'ducklake:postgres:{uri}' AS {_CLEANUP_PROBE_ALIAS} (
-                METADATA_SCHEMA '{schema}',
-                CREATE_IF_NOT_EXISTS false,
-                READ_ONLY
+            ATTACH 'ducklake:postgres:{uri}' AS {alias} (
+                {", ".join(options)}
             )
             """
         )
         row = connection.execute(
-            """
+            f"""
             SELECT count(*)::BIGINT
-            FROM ducklake_cleanup_old_files(?, dry_run => true)
+            FROM {function}(?, dry_run => true)
             """,
-            [_CLEANUP_PROBE_ALIAS],
+            [alias],
         ).fetchone()
         if row is None or len(row) != 1:
             raise InventoryError(
-                f"DuckLake returned invalid cleanup diagnosis: {metadata_schema}"
+                f"DuckLake returned invalid {diagnosis}: {metadata_schema}"
             )
         return int(row[0])
     except InventoryError:
         raise
     except duckdb.Error as error:
         raise InventoryError(
-            f"could not diagnose scheduled-file cleanup: {metadata_schema}"
+            f"could not diagnose {diagnosis}: {metadata_schema}"
         ) from error
     finally:
         connection.close()
+
+
+def _cleanup_eligible_files(
+    configuration: MetadataConfiguration,
+    metadata_schema: str,
+) -> int:
+    """Ask DuckLake to resolve its own persisted/default cleanup policy."""
+
+    return _native_dry_run_count(
+        configuration,
+        metadata_schema,
+        alias=_CLEANUP_PROBE_ALIAS,
+        function="ducklake_cleanup_old_files",
+        diagnosis="scheduled-file cleanup",
+    )
+
+
+def _expiring_snapshots(
+    configuration: MetadataConfiguration,
+    metadata_schema: str,
+) -> int:
+    """Ask DuckLake to resolve its persisted snapshot-retention policy."""
+
+    return _native_dry_run_count(
+        configuration,
+        metadata_schema,
+        alias=_EXPIRATION_PROBE_ALIAS,
+        function="ducklake_expire_snapshots",
+        diagnosis="snapshot expiration",
+    )
+
+
+def _orphan_files(
+    configuration: MetadataConfiguration,
+    storage: StorageConfiguration,
+    metadata_schema: str,
+) -> int:
+    """Run DuckLake's storage-aware orphan diagnosis without deleting files."""
+
+    # DuckLake currently rejects this dry run on a READ_ONLY attachment.
+    # The function is still non-mutating because dry_run remains explicit.
+    return _native_dry_run_count(
+        configuration,
+        metadata_schema,
+        alias=_ORPHAN_PROBE_ALIAS,
+        function="ducklake_delete_orphaned_files",
+        diagnosis="orphan-file cleanup",
+        storage=storage,
+        read_only=False,
+    )
 
 
 def _with_cleanup_eligibility(
@@ -774,9 +871,55 @@ def _with_cleanup_eligibility(
     return CatalogInventory(lakes=lakes)
 
 
+def _with_expiration_eligibility(
+    configuration: MetadataConfiguration,
+    inventory: CatalogInventory,
+) -> CatalogInventory:
+    if not inventory.lakes:
+        return inventory
+    lakes = tuple(
+        replace(
+            lake,
+            expiring_snapshots=_expiring_snapshots(
+                configuration,
+                lake.metadata_schema,
+            ),
+        )
+        for lake in inventory.lakes
+    )
+    return CatalogInventory(lakes=lakes)
+
+
+def _with_orphan_eligibility(
+    configuration: MetadataConfiguration,
+    storage: StorageConfiguration,
+    inventory: CatalogInventory,
+    schemas: frozenset[str],
+) -> CatalogInventory:
+    if not schemas:
+        return inventory
+    lakes = tuple(
+        replace(
+            lake,
+            orphan_files=_orphan_files(
+                configuration,
+                storage,
+                lake.metadata_schema,
+            ),
+        )
+        if lake.metadata_schema in schemas
+        else lake
+        for lake in inventory.lakes
+    )
+    return CatalogInventory(lakes=lakes)
+
+
 def inventory_catalog(
     configuration: MetadataConfiguration,
     detection: BackendDetection,
+    storage: StorageConfiguration | None = None,
+    *,
+    orphan_probe_schemas: frozenset[str] | None = None,
 ) -> CatalogInventory:
     """Inventory the configured catalog through a read-only metadata attach."""
 
@@ -811,4 +954,83 @@ def inventory_catalog(
         if attached:
             connection.execute(f"DETACH {_INVENTORY_ALIAS}")
         connection.close()
-    return _with_cleanup_eligibility(configuration, inventory)
+    inventory = _with_expiration_eligibility(configuration, inventory)
+    inventory = _with_cleanup_eligibility(configuration, inventory)
+    if storage is not None:
+        schemas = (
+            frozenset(detection.metadata_schemas)
+            if orphan_probe_schemas is None
+            else orphan_probe_schemas
+        )
+        inventory = _with_orphan_eligibility(
+            configuration,
+            storage,
+            inventory,
+            schemas,
+        )
+    return inventory
+
+
+@dataclass(slots=True)
+class MaintenanceInventory:
+    """Inventory all native work while throttling expensive orphan scans."""
+
+    storage: StorageConfiguration
+    orphan_scan_interval_seconds: float | None = None
+    clock: Callable[[], float] = monotonic
+    _orphan_files_by_lake: dict[str, int] = field(default_factory=dict)
+    _orphan_scanned_at: dict[str, float] = field(default_factory=dict)
+
+    def __call__(
+        self,
+        configuration: MetadataConfiguration,
+        detection: BackendDetection,
+    ) -> CatalogInventory:
+        now = self.clock()
+        due = frozenset(
+            schema
+            for schema in detection.metadata_schemas
+            if self.orphan_scan_interval_seconds is None
+            or schema not in self._orphan_scanned_at
+            or (
+                now - self._orphan_scanned_at[schema]
+                >= self.orphan_scan_interval_seconds
+            )
+        )
+        inventory = inventory_catalog(
+            configuration,
+            detection,
+            self.storage,
+            orphan_probe_schemas=due,
+        )
+        lakes: list[LakeInventory] = []
+        for lake in inventory.lakes:
+            if lake.metadata_schema in due:
+                self._orphan_files_by_lake[lake.metadata_schema] = lake.orphan_files
+                self._orphan_scanned_at[lake.metadata_schema] = now
+            lakes.append(
+                replace(
+                    lake,
+                    orphan_files=self._orphan_files_by_lake.get(
+                        lake.metadata_schema,
+                        0,
+                    ),
+                )
+            )
+        return CatalogInventory(lakes=tuple(lakes))
+
+    def treatment_completed(
+        self,
+        selection: TreatmentSelection,
+        result: TreatmentResult,
+    ) -> None:
+        """Update the cached orphan debt after its native cleanup succeeds."""
+
+        if selection.kind is not TreatmentKind.ORPHAN_FILE_CLEANUP:
+            return
+        previous = self._orphan_files_by_lake.get(selection.metadata_schema, 0)
+        self._orphan_files_by_lake[selection.metadata_schema] = max(
+            0,
+            previous - result.files_processed,
+        )
+        self._orphan_scanned_at[selection.metadata_schema] = self.clock()

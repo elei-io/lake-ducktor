@@ -137,6 +137,31 @@ def test_scheduled_cleanup_is_ranked_at_lake_scope() -> None:
     assert plan.runnable == 1
 
 
+def test_snapshot_and_orphan_housekeeping_are_ranked_at_lake_scope() -> None:
+    diagnosis = CatalogDiagnosis(
+        lakes=(
+            LakeDiagnosis(
+                metadata_schema="lake",
+                state=DiagnosisState.ACTIONABLE,
+                scheduled_files=0,
+                tables=(),
+                expiring_snapshots=4,
+                orphan_files=9,
+                delete_older_than="2 days",
+                expire_older_than="1 week",
+            ),
+        )
+    )
+
+    plan = prioritize(diagnosis)
+
+    assert plan.snapshot_expirations[0].snapshots == 4
+    assert plan.snapshot_expirations[0].expire_older_than == "1 week"
+    assert plan.orphan_file_cleanups[0].orphan_files == 9
+    assert plan.orphan_file_cleanups[0].delete_older_than == "2 days"
+    assert plan.runnable == 2
+
+
 def test_rewrites_rank_fraction_then_deleted_rows_then_cost() -> None:
     candidates = (
         table_diagnosis(

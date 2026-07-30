@@ -16,6 +16,12 @@ Scheduled-file eligibility is obtained from DuckLake's own read-only cleanup
 dry run. The worker does not override `delete_older_than`; a cleanup treatment
 uses the lake's persisted policy or the extension's native default.
 
+Snapshot-expiration eligibility is obtained from DuckLake's native dry run
+without overriding `expire_older_than`. Orphan eligibility requires a storage
+walk, so the worker performs it at startup and then every
+`ORPHAN_SCAN_INTERVAL_SECONDS` instead of every poll. Orphan deletion likewise
+uses DuckLake's stored/default `delete_older_than`.
+
 A pod performs one treatment at a time. Each treatment runs in an isolated
 child process and creates its own DuckDB connection. Connections are never
 shared with the parent loop, health server, watchdog, or another treatment.

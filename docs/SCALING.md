@@ -17,11 +17,13 @@ appropriately sized worker, not additional replicas competing for its claim.
 LakeDucktor exposes metrics that distinguish demand from capacity:
 
 - actionable, runnable, blocked, and memory-deferred work
-- scheduled files and dangling delete files
+- expiring snapshots, scheduled/cleanup-eligible files, orphan files, and
+  dangling delete files
 - recent insertion-file activity
 - accumulated inlined rows and serialized bytes
 - running and stuck treatment state
-- treatment throughput, duration, outcomes, files eliminated, and rows flushed
+- treatment throughput, duration, outcomes, files eliminated, rows flushed,
+  and snapshots expired
 - estimated merge/rewrite file debt and claim contention
 - worker readiness, liveness, stuck state, and cycle outcomes
 

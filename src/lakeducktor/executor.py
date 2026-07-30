@@ -122,6 +122,21 @@ def execute_native_treatment(
     """Invoke DuckLake for exactly one selected table."""
 
     rows_processed = 0
+    if selection.kind is TreatmentKind.SNAPSHOT_EXPIRATION:
+        rows = connection.execute(
+            """
+            SELECT count(*)::BIGINT
+            FROM ducklake_expire_snapshots(?)
+            """,
+            [_TREATMENT_ALIAS],
+        ).fetchall()
+        if len(rows) != 1 or len(rows[0]) != 1:
+            raise ExecutionError("DuckLake returned an invalid expiration result")
+        return TreatmentResult(
+            files_processed=0,
+            files_created=0,
+            snapshots_processed=int(rows[0][0]),
+        )
     if selection.kind is TreatmentKind.SCHEDULED_FILE_CLEANUP:
         rows = connection.execute(
             """
@@ -132,6 +147,20 @@ def execute_native_treatment(
         ).fetchall()
         if len(rows) != 1 or len(rows[0]) != 1:
             raise ExecutionError("DuckLake returned an invalid cleanup result")
+        return TreatmentResult(
+            files_processed=int(rows[0][0]),
+            files_created=0,
+        )
+    if selection.kind is TreatmentKind.ORPHAN_FILE_CLEANUP:
+        rows = connection.execute(
+            """
+            SELECT count(*)::BIGINT
+            FROM ducklake_delete_orphaned_files(?)
+            """,
+            [_TREATMENT_ALIAS],
+        ).fetchall()
+        if len(rows) != 1 or len(rows[0]) != 1:
+            raise ExecutionError("DuckLake returned an invalid orphan cleanup result")
         return TreatmentResult(
             files_processed=int(rows[0][0]),
             files_created=0,
@@ -365,6 +394,7 @@ def _isolated_child(
                 result.files_processed,
                 result.files_created,
                 result.rows_processed,
+                result.snapshots_processed,
             )
         )
     except ExecutionError as error:
@@ -433,6 +463,7 @@ class IsolatedTreatmentExecutor:
                 files_processed=int(message[1]),
                 files_created=int(message[2]),
                 rows_processed=int(message[3]),
+                snapshots_processed=int(message[4]),
             )
         reason = ExecutionFailureReason(str(message[1]))
         raise ExecutionError(str(message[2]), reason=reason)

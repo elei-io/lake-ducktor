@@ -205,6 +205,7 @@ class RunConfiguration:
     metrics_port: int
     conflict_backoff_base_seconds: float = 5.0
     conflict_backoff_max_seconds: float = 60.0
+    orphan_scan_interval_seconds: float = 3_600.0
 
     @classmethod
     def from_environment(
@@ -252,4 +253,9 @@ class RunConfiguration:
             metrics_port=metrics_port,
             conflict_backoff_base_seconds=conflict_backoff_base_seconds,
             conflict_backoff_max_seconds=conflict_backoff_max_seconds,
+            orphan_scan_interval_seconds=_positive_float(
+                values,
+                "ORPHAN_SCAN_INTERVAL_SECONDS",
+                3_600,
+            ),
         )

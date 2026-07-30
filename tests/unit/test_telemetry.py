@@ -207,6 +207,8 @@ def test_recent_insertion_files_are_exposed_as_an_aggregate_metric() -> None:
                 SimpleNamespace(
                     dangling_delete_files=0,
                     cleanup_eligible_files=3,
+                    expiring_snapshots=4,
+                    orphan_files=9,
                 ),
             ),
         ),
@@ -225,6 +227,8 @@ def test_recent_insertion_files_are_exposed_as_an_aggregate_metric() -> None:
 
     assert 'lakeducktor_recent_data_files{window="60s"} 7.0' in metrics
     assert "lakeducktor_cleanup_eligible_files 3.0" in metrics
+    assert "lakeducktor_expiring_snapshots 4.0" in metrics
+    assert "lakeducktor_orphan_files 9.0" in metrics
 
 
 def test_http_health_endpoints_and_metrics_share_no_worker_connection() -> None:
