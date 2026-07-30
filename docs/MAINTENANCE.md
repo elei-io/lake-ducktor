@@ -99,14 +99,19 @@ stored inline. LakeDucktor resolves that persisted option with table, schema,
 global, then native-default precedence and diagnoses flush pressure when:
 
 ```text
-active inlined rows >= max(1, data_inlining_row_limit × 5)
+active inlined rows >= max(
+    1,
+    data_inlining_row_limit × 5 × compatible output groups,
+)
+OR active inlined bytes >= 8 MiB
 ```
 
-The multiplier is LakeDucktor admission policy, not lake state. A zero limit
-therefore flushes any rows left from an earlier policy. `auto_compact=false`
-remains authoritative. Active inline rows and their approximate serialized
-bytes are rediscovered on every inventory; no flush watermark or task record
-is persisted by LakeDucktor.
+Compatible output groups are the table's current partition groups. The
+multiplier and byte bound are LakeDucktor admission policy, not lake state. A
+zero limit therefore flushes any rows left from an earlier policy.
+`auto_compact=false` remains authoritative. Active inline rows and their
+approximate serialized bytes are rediscovered on every inventory; no flush
+watermark or task record is persisted by LakeDucktor.
 
 ### Drain to verified health
 
@@ -237,10 +242,13 @@ Scheduled-file cleanup delegates eligibility to DuckLake and needs no DuckDB
 memory admission. A delete rewrite is admitted only when the complete active
 table footprint fits the memory envelope. An inline flush is admitted only
 when its current serialized inline input fits. A merge is admitted when at
-least one target-sized output fits. Its native `max_compacted_files` bound is
-derived from the number of target-sized outputs that fit, capped by the
-diagnosed output count. Oversized work remains reported as memory-deferred and
-does not block an independent treatment.
+least one complete compatible input group fits. Selection admits whole groups
+until their actual files reach 512 or their actual bytes reach usable memory.
+Its native `max_compacted_files` bound is the sum of the outputs expected from
+those admitted groups, so a safe call may produce several outputs. If detailed
+group data is unavailable, selection retains its conservative estimate.
+Oversized work remains reported as memory-deferred and does not block an
+independent treatment.
 
 Admission reads the table's current active sort configuration from
 `ducklake_sort_info`. This is refreshed after claiming because DuckLake applies
@@ -280,8 +288,8 @@ context with the configured memory and threads:
 
 - merges call DuckLake's table-scoped `merge_adjacent_files` with a
   session-only execution target and output-group count selected to keep the
-  estimated treatment at no more than 512 input files and within usable
-  memory;
+  admitted compatible groups at no more than 512 actual input files and
+  within usable memory;
 - delete rewrites call DuckLake's table-scoped `rewrite_data_files` without
   overriding the lake's effective threshold;
 - inline flushes call DuckLake's table-scoped `ducklake_flush_inlined_data` and

@@ -223,6 +223,8 @@ def test_diagnose_command_logs_lake_and_table_explanations(
         sorting_enabled=False,
         merge_groups=1,
         data_inlining_row_limit=10,
+        inline_flush_groups=1,
+        inline_flush_max_bytes=8 * 1024 * 1024,
         inline_flush_threshold_rows=50,
         inlined_data_rows=0,
         inlined_data_bytes=0,
@@ -473,6 +475,7 @@ def test_select_command_logs_resource_envelope_and_one_treatment(
         "selected treatment=merge priority_rank=1 lake=lake_a table_id=7 "
         "schema='main' table='events' input_bytes=1000 input_rows=0 "
         "input_snapshots=0 "
+        "admitted_input_files=0 "
         "admitted_bytes=512 "
         "sorting_enabled=false memory_headroom_bytes=1000000000 "
         "usable_memory_bytes=3000000000 "

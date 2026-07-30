@@ -210,6 +210,55 @@ def _merge_selection(
         envelope,
         candidate.sorting_enabled,
     )
+    if candidate.input_groups and usable_memory > 0:
+        execution_target = min(
+            candidate.target_file_size_bytes,
+            usable_memory,
+        )
+        admitted_files = 0
+        admitted_bytes = 0
+        admitted_outputs = 0
+        for group in candidate.input_groups:
+            group_files = group.merge_candidate_files
+            group_bytes = group.merge_candidate_bytes
+            if group_files < 2 or group_bytes <= 0:
+                raise SelectionError(
+                    "merge has an invalid compatible group for "
+                    f"table_id={candidate.table_id}"
+                )
+            expected_outputs = max(
+                1,
+                (group_bytes + execution_target - 1) // execution_target,
+            )
+            if expected_outputs >= group_files:
+                continue
+            if (
+                admitted_files + group_files > _MAXIMUM_MERGE_INPUT_FILES
+                or admitted_bytes + group_bytes > usable_memory
+            ):
+                break
+            admitted_files += group_files
+            admitted_bytes += group_bytes
+            admitted_outputs += expected_outputs
+        if admitted_outputs:
+            return TreatmentSelection(
+                kind=TreatmentKind.MERGE,
+                priority_rank=candidate.rank,
+                metadata_schema=candidate.metadata_schema,
+                table_id=candidate.table_id,
+                schema_name=candidate.schema_name,
+                table_name=candidate.table_name,
+                input_bytes=candidate.input_bytes,
+                admitted_bytes=admitted_bytes,
+                sorting_enabled=candidate.sorting_enabled,
+                memory_headroom_bytes=headroom,
+                usable_memory_bytes=usable_memory,
+                max_compacted_files=admitted_outputs,
+                input_files=candidate.input_files,
+                lake_target_file_size_bytes=candidate.target_file_size_bytes,
+                execution_target_file_size_bytes=execution_target,
+                admitted_input_files=admitted_files,
+            )
     minimum_input_file_bytes = (
         candidate.minimum_input_file_bytes
         if candidate.minimum_input_file_bytes > 0
@@ -258,6 +307,10 @@ def _merge_selection(
         input_files=candidate.input_files,
         lake_target_file_size_bytes=candidate.target_file_size_bytes,
         execution_target_file_size_bytes=execution_target_file_size_bytes,
+        admitted_input_files=min(
+            candidate.input_files,
+            _MAXIMUM_MERGE_INPUT_FILES,
+        ),
     )
 
 

@@ -85,6 +85,51 @@ def test_disabled_inlining_flushes_any_rows_left_from_the_old_policy() -> None:
     assert diagnosis.state is DiagnosisState.ACTIONABLE
 
 
+def test_inline_flush_row_threshold_scales_with_existing_groups() -> None:
+    groups = tuple(
+        CompatibleFileGroup(1, partition, 1, 100, 1, 100)
+        for partition in range(4)
+    )
+
+    below = diagnose_table(
+        table_inventory(
+            compatible_file_groups=groups,
+            inlined_data_rows=199,
+            inlined_data_bytes=19_900,
+        )
+    )
+    ready = diagnose_table(
+        table_inventory(
+            compatible_file_groups=groups,
+            inlined_data_rows=200,
+            inlined_data_bytes=20_000,
+        )
+    )
+
+    assert below.inline_flush_groups == 4
+    assert below.inline_flush_threshold_rows == 200
+    assert below.state is DiagnosisState.HEALTHY
+    assert ready.state is DiagnosisState.ACTIONABLE
+
+
+def test_inline_flush_byte_ceiling_bounds_sparse_groups() -> None:
+    diagnosis = diagnose_table(
+        table_inventory(
+            compatible_file_groups=(
+                CompatibleFileGroup(1, 1, 1, 100, 1, 100),
+                CompatibleFileGroup(1, 2, 1, 100, 1, 100),
+            ),
+            inlined_data_rows=2,
+            inlined_data_bytes=8 * 1024 * 1024,
+        )
+    )
+
+    assert diagnosis.inline_flush_threshold_rows == 100
+    assert diagnosis.inline_flush_max_bytes == 8 * 1024 * 1024
+    assert diagnosis.state is DiagnosisState.ACTIONABLE
+    assert diagnosis.reasons == ("inline_flush_pressure",)
+
+
 def test_auto_compact_excludes_inline_flush() -> None:
     diagnosis = diagnose_table(
         table_inventory(
@@ -147,6 +192,7 @@ def test_merge_pressure_requires_expected_file_elimination() -> None:
     assert diagnosis.merge_groups == 1
     assert diagnosis.merge_input_files == 4
     assert diagnosis.expected_files_eliminated == 2
+    assert diagnosis.merge_candidate_groups == (group,)
     assert diagnosis.reasons == ("merge_pressure",)
 
 

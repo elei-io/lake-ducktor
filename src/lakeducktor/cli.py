@@ -196,6 +196,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "diagnosis lake=%s table_id=%s schema=%r table=%r "
                         "state=%s reasons=%s sorting_enabled=%s merge_groups=%s "
                         "data_inlining_row_limit=%s "
+                        "inline_flush_groups=%s inline_flush_max_bytes=%s "
                         "inline_flush_threshold_rows=%s "
                         "inlined_data_rows=%s inlined_data_bytes=%s "
                         "merge_input_files=%s merge_input_bytes=%s "
@@ -212,6 +213,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         str(table.sorting_enabled).lower(),
                         table.merge_groups,
                         table.data_inlining_row_limit,
+                        table.inline_flush_groups,
+                        table.inline_flush_max_bytes,
                         table.inline_flush_threshold_rows,
                         table.inlined_data_rows,
                         table.inlined_data_bytes,
@@ -273,7 +276,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "table_id=%s schema=%r table=%r state=runnable "
                             "sorting_enabled=%s inlined_rows=%s "
                             "input_bytes=%s threshold_rows=%s "
-                            "data_inlining_row_limit=%s",
+                            "data_inlining_row_limit=%s output_groups=%s "
+                            "max_input_bytes=%s",
                             candidate.rank,
                             candidate.metadata_schema,
                             candidate.table_id,
@@ -284,6 +288,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                             candidate.input_bytes,
                             candidate.threshold_rows,
                             candidate.data_inlining_row_limit,
+                            candidate.output_groups,
+                            candidate.max_input_bytes,
                         )
                     for candidate in plan.delete_rewrites:
                         _LOGGER.info(
@@ -379,6 +385,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 "selected treatment=%s priority_rank=%s lake=%s "
                                 "table_id=%s schema=%r table=%r input_bytes=%s "
                                 "input_rows=%s input_snapshots=%s "
+                                "admitted_input_files=%s "
                                 "admitted_bytes=%s sorting_enabled=%s "
                                 "memory_headroom_bytes=%s "
                                 "usable_memory_bytes=%s max_compacted_files=%s "
@@ -393,6 +400,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 selected.input_bytes,
                                 selected.input_rows,
                                 selected.input_snapshots,
+                                selected.admitted_input_files,
                                 selected.admitted_bytes,
                                 str(selected.sorting_enabled).lower(),
                                 selected.memory_headroom_bytes,

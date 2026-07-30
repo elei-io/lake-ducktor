@@ -163,6 +163,12 @@ class WorkerTelemetry:
             ("kind",),
             registry=self.registry,
         )
+        self._input_bound_exceeded = Counter(
+            "lakeducktor_treatment_input_bound_exceeded_total",
+            "Treatments that processed more files than their observed admission bound.",
+            ("kind",),
+            registry=self.registry,
+        )
         self._files_processed = Counter(
             "lakeducktor_treatment_files_processed_total",
             "Input files processed by successful native treatments.",
@@ -299,6 +305,7 @@ class WorkerTelemetry:
             self._files_eliminated.labels(kind=kind.value)
             self._rows_processed.labels(kind=kind.value)
             self._snapshots_processed.labels(kind=kind.value)
+            self._input_bound_exceeded.labels(kind=kind.value)
         self._set_health_metrics(self.health_snapshot())
 
     @property
@@ -388,6 +395,11 @@ class WorkerTelemetry:
             }:
                 self._treatment_conflicts.labels(reason=reason.value).inc()
         if result is not None:
+            if (
+                selection.admitted_input_files > 0
+                and result.files_processed > selection.admitted_input_files
+            ):
+                self._input_bound_exceeded.labels(kind=selection.kind.value).inc()
             self._files_processed.labels(kind=selection.kind.value).inc(
                 result.files_processed
             )

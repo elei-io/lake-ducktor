@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from time import sleep
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -178,6 +179,26 @@ def test_conflict_retry_and_partial_progress_are_counted() -> None:
     )
     assert (
         'lakeducktor_treatment_partial_progress_files_total{kind="merge"} 384.0'
+        in metrics
+    )
+
+
+def test_observed_merge_input_bound_mismatch_is_counted() -> None:
+    worker = telemetry(FakeClock())
+    chosen = replace(selection(), admitted_input_files=100)
+
+    worker.treatment_started(chosen)
+    worker.treatment_finished(
+        chosen,
+        TreatmentResult(files_processed=101, files_created=1),
+        None,
+        1,
+    )
+
+    metrics = generate_latest(worker.registry).decode()
+
+    assert (
+        'lakeducktor_treatment_input_bound_exceeded_total{kind="merge"} 1.0'
         in metrics
     )
 

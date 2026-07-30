@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 from lakeducktor.model import (
+    CompatibleFileGroup,
     DeleteRewritePriority,
     InlineFlushPriority,
     MergePriority,
@@ -54,6 +55,7 @@ def merge(
     state: PriorityState = PriorityState.RUNNABLE,
     target: int = 100,
     minimum: int = 0,
+    input_groups: tuple[CompatibleFileGroup, ...] = (),
 ) -> MergePriority:
     return MergePriority(
         rank=rank,
@@ -76,6 +78,7 @@ def merge(
         adjusted_expected_files_eliminated=5,
         sorting_enabled=False,
         minimum_input_file_bytes=minimum,
+        input_groups=input_groups,
     )
 
 
@@ -230,6 +233,51 @@ def test_merge_batch_uses_multiple_groups_within_input_and_memory_bounds() -> No
     assert decision.selected.max_compacted_files == 2
     assert decision.selected.admitted_bytes == 200
     assert decision.selected.execution_target_file_size_bytes == 100
+
+
+def test_merge_admits_whole_compatible_groups_by_actual_inputs() -> None:
+    groups = (
+        CompatibleFileGroup(1, 1, 20, 80, 20, 80),
+        CompatibleFileGroup(1, 2, 30, 90, 30, 90),
+        CompatibleFileGroup(1, 3, 470, 95, 470, 95),
+    )
+    candidate = replace(
+        merge(1, 1, input_groups=groups),
+        groups=3,
+        input_files=520,
+        input_bytes=265,
+        expected_files_eliminated=517,
+    )
+
+    selected = select_treatment(plan(merges=(candidate,)), _ENVELOPE).selected
+
+    assert selected is not None
+    assert selected.max_compacted_files == 2
+    assert selected.admitted_input_files == 50
+    assert selected.admitted_bytes == 170
+    assert selected.input_files == 520
+    assert selected.execution_target_file_size_bytes == 100
+
+
+def test_merge_group_admission_stops_at_usable_memory() -> None:
+    groups = (
+        CompatibleFileGroup(1, 1, 2, 100, 2, 100),
+        CompatibleFileGroup(1, 2, 2, 200, 2, 200),
+    )
+    candidate = replace(
+        merge(1, 1, input_groups=groups),
+        groups=2,
+        input_files=4,
+        input_bytes=300,
+        expected_files_eliminated=2,
+    )
+
+    selected = select_treatment(plan(merges=(candidate,)), _ENVELOPE).selected
+
+    assert selected is not None
+    assert selected.max_compacted_files == 1
+    assert selected.admitted_input_files == 2
+    assert selected.admitted_bytes == 100
 
 
 def test_merge_execution_target_is_reduced_to_fit_memory() -> None:

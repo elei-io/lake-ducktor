@@ -251,7 +251,10 @@ def _still_actionable(
     if selection.kind is TreatmentKind.DELETE_REWRITE:
         return True, table.rewrite_data_files > 0
     if selection.kind is TreatmentKind.INLINE_FLUSH:
-        return True, (table.inlined_data_rows >= table.inline_flush_threshold_rows)
+        return True, (
+            table.inlined_data_rows >= table.inline_flush_threshold_rows
+            or table.inlined_data_bytes >= table.inline_flush_max_bytes
+        )
     return True, table.expected_files_eliminated > 0
 
 
@@ -363,6 +366,7 @@ def maintain_once(
                     "treatment_started kind=%s lake=%s table_id=%s "
                     "schema=%r table=%r input_files=%s input_rows=%s "
                     "input_snapshots=%s "
+                    "admitted_input_files=%s "
                     "input_bytes=%s "
                     "lake_target_bytes=%s execution_target_bytes=%s "
                     "admitted_bytes=%s "
@@ -377,6 +381,7 @@ def maintain_once(
                     selection.input_files,
                     selection.input_rows,
                     selection.input_snapshots,
+                    selection.admitted_input_files,
                     selection.input_bytes,
                     selection.lake_target_file_size_bytes
                     if selection.lake_target_file_size_bytes is not None
@@ -503,6 +508,20 @@ def maintain_once(
                     result.snapshots_processed,
                     duration_seconds,
                 )
+                if (
+                    selection.admitted_input_files > 0
+                    and result.files_processed > selection.admitted_input_files
+                ):
+                    _LOGGER.warning(
+                        "treatment_input_bound_exceeded kind=%s lake=%s "
+                        "table_id=%s admitted_input_files=%s "
+                        "actual_input_files=%s",
+                        selection.kind.value,
+                        selection.metadata_schema,
+                        selection.table_id,
+                        selection.admitted_input_files,
+                        result.files_processed,
+                    )
                 _, verification, _ = _fresh_state(
                     configuration,
                     detection,

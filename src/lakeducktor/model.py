@@ -220,6 +220,9 @@ class TableDiagnosis:
     inline_flush_threshold_rows: int = 50
     inlined_data_rows: int = 0
     inlined_data_bytes: int = 0
+    inline_flush_groups: int = 1
+    inline_flush_max_bytes: int = 8 * 1024 * 1024
+    merge_candidate_groups: tuple[CompatibleFileGroup, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +293,7 @@ class MergePriority:
     adjusted_expected_files_eliminated: float
     sorting_enabled: bool
     minimum_input_file_bytes: int = 0
+    input_groups: tuple[CompatibleFileGroup, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +308,8 @@ class InlineFlushPriority:
     threshold_rows: int
     data_inlining_row_limit: int
     sorting_enabled: bool
+    output_groups: int = 1
+    max_input_bytes: int = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -390,6 +396,7 @@ class TreatmentSelection:
     input_rows: int = 0
     input_snapshots: int = 0
     retention_policy: str | None = None
+    admitted_input_files: int = 0
 
 
 @dataclass(frozen=True, slots=True)

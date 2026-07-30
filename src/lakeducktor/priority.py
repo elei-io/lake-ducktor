@@ -107,11 +107,23 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
         table
         for table in tables
         if table.state is DiagnosisState.ACTIONABLE
-        and table.inlined_data_rows >= table.inline_flush_threshold_rows
+        and (
+            table.inlined_data_rows >= table.inline_flush_threshold_rows
+            or table.inlined_data_bytes >= table.inline_flush_max_bytes
+        )
     ]
     flush_tables.sort(
         key=lambda table: (
-            -Fraction(table.inlined_data_rows, table.inline_flush_threshold_rows),
+            -max(
+                Fraction(
+                    table.inlined_data_rows,
+                    table.inline_flush_threshold_rows,
+                ),
+                Fraction(
+                    table.inlined_data_bytes,
+                    table.inline_flush_max_bytes,
+                ),
+            ),
             -table.inlined_data_rows,
             table.inlined_data_bytes,
             table.metadata_schema,
@@ -130,6 +142,8 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
             threshold_rows=table.inline_flush_threshold_rows,
             data_inlining_row_limit=table.data_inlining_row_limit,
             sorting_enabled=table.sorting_enabled,
+            output_groups=table.inline_flush_groups,
+            max_input_bytes=table.inline_flush_max_bytes,
         )
         for rank, table in enumerate(flush_tables, start=1)
     )
@@ -260,6 +274,7 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
                 adjusted_expected_files_eliminated=float(adjusted_eliminations),
                 sorting_enabled=table.sorting_enabled,
                 minimum_input_file_bytes=(table.minimum_merge_candidate_file_bytes),
+                input_groups=table.merge_candidate_groups,
             )
         )
     merges = tuple(merge_priorities)

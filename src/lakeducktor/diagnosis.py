@@ -5,6 +5,7 @@ from __future__ import annotations
 from lakeducktor.model import (
     CatalogDiagnosis,
     CatalogInventory,
+    CompatibleFileGroup,
     DiagnosisState,
     LakeDiagnosis,
     TableDiagnosis,
@@ -17,14 +18,23 @@ class DiagnosisError(RuntimeError):
 
 
 _INLINE_FLUSH_LIMIT_MULTIPLIER = 5
+_INLINE_FLUSH_MAX_BYTES = 8 * 1024 * 1024
 
 
-def inline_flush_threshold(data_inlining_row_limit: int) -> int:
+def inline_flush_threshold(
+    data_inlining_row_limit: int,
+    output_groups: int = 1,
+) -> int:
     """Derive accumulated-row pressure from DuckLake's effective write limit."""
 
     if data_inlining_row_limit < 0:
         raise DiagnosisError("data_inlining_row_limit cannot be negative")
-    return max(1, data_inlining_row_limit * _INLINE_FLUSH_LIMIT_MULTIPLIER)
+    if output_groups <= 0:
+        raise DiagnosisError("inline output group count must be greater than zero")
+    return max(
+        1,
+        data_inlining_row_limit * _INLINE_FLUSH_LIMIT_MULTIPLIER * output_groups,
+    )
 
 
 def diagnose_table(table: TableInventory) -> TableDiagnosis:
@@ -36,7 +46,11 @@ def diagnose_table(table: TableInventory) -> TableDiagnosis:
         raise DiagnosisError(
             f"invalid rewrite_delete_threshold for table_id={table.table_id}"
         )
-    flush_threshold_rows = inline_flush_threshold(table.data_inlining_row_limit)
+    inline_output_groups = max(1, len(table.compatible_file_groups))
+    flush_threshold_rows = inline_flush_threshold(
+        table.data_inlining_row_limit,
+        inline_output_groups,
+    )
     if table.inlined_data_rows < 0 or table.inlined_data_bytes < 0:
         raise DiagnosisError(f"invalid inlined data for table_id={table.table_id}")
 
@@ -44,6 +58,7 @@ def diagnose_table(table: TableInventory) -> TableDiagnosis:
     merge_input_files = 0
     merge_input_bytes = 0
     expected_files_eliminated = 0
+    merge_candidate_groups: list[CompatibleFileGroup] = []
     for group in table.compatible_file_groups:
         if group.merge_candidate_files < 2:
             continue
@@ -59,9 +74,13 @@ def diagnose_table(table: TableInventory) -> TableDiagnosis:
         merge_input_files += group.merge_candidate_files
         merge_input_bytes += group.merge_candidate_bytes
         expected_files_eliminated += eliminated
+        merge_candidate_groups.append(group)
 
     reasons: list[str] = []
-    if table.inlined_data_rows >= flush_threshold_rows:
+    if (
+        table.inlined_data_rows >= flush_threshold_rows
+        or table.inlined_data_bytes >= _INLINE_FLUSH_MAX_BYTES
+    ):
         reasons.append("inline_flush_pressure")
     if merge_groups:
         reasons.append("merge_pressure")
@@ -109,6 +128,9 @@ def diagnose_table(table: TableInventory) -> TableDiagnosis:
         inline_flush_threshold_rows=flush_threshold_rows,
         inlined_data_rows=table.inlined_data_rows,
         inlined_data_bytes=table.inlined_data_bytes,
+        inline_flush_groups=inline_output_groups,
+        inline_flush_max_bytes=_INLINE_FLUSH_MAX_BYTES,
+        merge_candidate_groups=tuple(merge_candidate_groups),
     )
 
 

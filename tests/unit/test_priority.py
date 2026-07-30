@@ -5,6 +5,7 @@ import pytest
 
 from lakeducktor.model import (
     CatalogDiagnosis,
+    CompatibleFileGroup,
     DiagnosisState,
     LakeDiagnosis,
     PriorityState,
@@ -110,6 +111,40 @@ def test_inline_flush_is_ranked_and_blocks_same_table_merge() -> None:
     assert plan.merges[0].state is PriorityState.BLOCKED
     assert plan.merges[0].blocked_by is TreatmentKind.INLINE_FLUSH
     assert plan.runnable == 1
+
+
+def test_inline_flush_is_ranked_when_only_byte_ceiling_is_reached() -> None:
+    byte_heavy = table_diagnosis(
+        1,
+        state=DiagnosisState.ACTIONABLE,
+        reasons=("inline_flush_pressure",),
+        inlined_data_rows=1,
+        inlined_data_bytes=8 * 1024 * 1024,
+        inline_flush_threshold_rows=50,
+        inline_flush_max_bytes=8 * 1024 * 1024,
+    )
+
+    plan = prioritize(catalog(byte_heavy))
+
+    assert [candidate.table_id for candidate in plan.inline_flushes] == [1]
+
+
+def test_priority_preserves_compatible_merge_groups_for_admission() -> None:
+    group = CompatibleFileGroup(1, 7, 4, 160, 4, 160)
+    candidate = table_diagnosis(
+        1,
+        state=DiagnosisState.ACTIONABLE,
+        reasons=("merge_pressure",),
+        merge_groups=1,
+        merge_input_files=4,
+        merge_input_bytes=160,
+        expected_files_eliminated=2,
+        merge_candidate_groups=(group,),
+    )
+
+    plan = prioritize(catalog(candidate))
+
+    assert plan.merges[0].input_groups == (group,)
 
 
 def test_scheduled_cleanup_is_ranked_at_lake_scope() -> None:
