@@ -4,10 +4,12 @@ import pytest
 
 from lakeducktor.model import (
     DeleteRewritePriority,
+    InlineFlushPriority,
     MergePriority,
     PriorityPlan,
     PriorityState,
     ResourceEnvelope,
+    ScheduledFileCleanupPriority,
     SelectionReason,
     TreatmentKind,
 )
@@ -75,8 +77,25 @@ def merge(
     )
 
 
+def flush(rank: int, table_id: int, input_bytes: int) -> InlineFlushPriority:
+    return InlineFlushPriority(
+        rank=rank,
+        metadata_schema="lake",
+        table_id=table_id,
+        schema_name="main",
+        table_name=f"table_{table_id}",
+        inlined_rows=50,
+        input_bytes=input_bytes,
+        threshold_rows=50,
+        data_inlining_row_limit=10,
+        sorting_enabled=False,
+    )
+
+
 def plan(
     *,
+    cleanups: tuple[ScheduledFileCleanupPriority, ...] = (),
+    flushes: tuple[InlineFlushPriority, ...] = (),
     rewrites: tuple[DeleteRewritePriority, ...] = (),
     merges: tuple[MergePriority, ...] = (),
 ) -> PriorityPlan:
@@ -85,7 +104,32 @@ def plan(
         merges=merges,
         excluded_tables=0,
         attention_tables=0,
+        inline_flushes=flushes,
+        scheduled_file_cleanups=cleanups,
     )
+
+
+def test_native_policy_cleanup_is_selected_without_memory_admission() -> None:
+    cleanup = ScheduledFileCleanupPriority(
+        rank=1,
+        metadata_schema="lake",
+        eligible_files=7,
+        scheduled_files=10,
+        oldest_scheduled_at=None,
+        delete_older_than=None,
+    )
+
+    decision = select_treatment(
+        plan(cleanups=(cleanup,), rewrites=(rewrite(1, 1, 500),)),
+        _ENVELOPE,
+    )
+
+    assert decision.selected is not None
+    assert decision.selected.kind is TreatmentKind.SCHEDULED_FILE_CLEANUP
+    assert decision.selected.table_id is None
+    assert decision.selected.input_files == 7
+    assert decision.selected.retention_policy == "native_default"
+    assert decision.memory_deferred == 1
 
 
 def test_first_fitting_rewrite_is_selected_before_merge_lane() -> None:
@@ -116,6 +160,29 @@ def test_oversized_rewrite_does_not_block_independent_merge() -> None:
     assert decision.selected.table_id == 2
     assert decision.selected.max_compacted_files == 2
     assert decision.selected.admitted_bytes == 200
+    assert decision.memory_deferred == 1
+
+
+def test_inline_flush_is_selected_before_merge_and_admitted_by_bytes() -> None:
+    decision = select_treatment(
+        plan(flushes=(flush(1, 1, 200),), merges=(merge(1, 2),)),
+        _ENVELOPE,
+    )
+
+    assert decision.selected is not None
+    assert decision.selected.kind is TreatmentKind.INLINE_FLUSH
+    assert decision.selected.input_rows == 50
+    assert decision.selected.admitted_bytes == 200
+
+
+def test_oversized_inline_flush_does_not_block_independent_merge() -> None:
+    decision = select_treatment(
+        plan(flushes=(flush(1, 1, 500),), merges=(merge(1, 2),)),
+        _ENVELOPE,
+    )
+
+    assert decision.selected is not None
+    assert decision.selected.kind is TreatmentKind.MERGE
     assert decision.memory_deferred == 1
 
 

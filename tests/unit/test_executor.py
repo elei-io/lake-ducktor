@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import duckdb
 import pytest
 
@@ -17,8 +19,11 @@ class FakeConnection:
     def __init__(
         self,
         rows: list[tuple[object, ...]] | None = None,
+        *,
+        row_batches: list[list[tuple[object, ...]]] | None = None,
     ) -> None:
         self.rows = [(4, 2)] if rows is None else rows
+        self.row_batches = list(row_batches) if row_batches is not None else None
         self.query = ""
         self.parameters: list[object] = []
         self.queries: list[tuple[str, list[object]]] = []
@@ -37,6 +42,8 @@ class FakeConnection:
 
     def fetchall(self) -> list[tuple[object, ...]]:
         self.result_exhausted = True
+        if self.row_batches is not None:
+            return self.row_batches.pop(0)
         return self.rows
 
     def close(self) -> None:
@@ -103,6 +110,59 @@ def test_rewrite_calls_native_function_without_overriding_threshold() -> None:
     ]
 
 
+def test_inline_flush_calls_native_table_scoped_function() -> None:
+    connection = FakeConnection(
+        row_batches=[
+            [(3,)],
+            [(50,)],
+            [(5,)],
+        ]
+    )
+
+    result = execute_native_treatment(
+        connection,
+        selection(TreatmentKind.INLINE_FLUSH, max_compacted_files=None),
+    )
+
+    flush = next(
+        (query, parameters)
+        for query, parameters in connection.queries
+        if "ducklake_flush_inlined_data" in query
+    )
+    assert flush[1] == [
+        "lakeducktor_treatment",
+        "events",
+        "analytics",
+    ]
+    assert (
+        sum("ducklake_list_files" in query for query, _parameters in connection.queries)
+        == 2
+    )
+    assert connection.row_batches == []
+    assert result.rows_processed == 50
+    assert result.files_processed == 0
+    assert result.files_created == 2
+
+
+def test_scheduled_cleanup_uses_native_policy_without_overrides() -> None:
+    connection = FakeConnection(rows=[(7,)])
+    chosen = replace(
+        selection(TreatmentKind.SCHEDULED_FILE_CLEANUP, max_compacted_files=None),
+        table_id=None,
+        schema_name=None,
+        table_name=None,
+    )
+
+    result = execute_native_treatment(connection, chosen)
+
+    assert "ducklake_cleanup_old_files" in connection.query
+    assert "older_than" not in connection.query
+    assert "cleanup_all" not in connection.query
+    assert connection.parameters == ["lakeducktor_treatment"]
+    assert result.files_processed == 7
+    assert result.files_created == 0
+
+
 def test_merge_requires_native_batch_bound() -> None:
     with pytest.raises(ExecutionError, match="max_compacted_files"):
         execute_native_treatment(
@@ -161,13 +221,51 @@ def test_executor_configures_writable_connection_without_exposing_secrets() -> N
     assert "PRAGMA disable_checkpoint_on_shutdown" in queries
     assert "SET threads = ?" in queries
     assert "SET memory_limit = ?" in queries
+    assert "SET ducklake_max_retry_count = ?" in queries
+    assert "SET ducklake_retry_wait_ms = ?" in queries
+    assert "SET ducklake_retry_backoff = ?" in queries
     assert "SET ducklake_target_file_size = ?" in queries
+    query_parameters = dict(connection.queries)
+    assert query_parameters["SET ducklake_max_retry_count = ?"] == [20]
+    assert query_parameters["SET ducklake_retry_wait_ms = ?"] == [100]
+    assert query_parameters["SET ducklake_retry_backoff = ?"] == [1.2]
     assert any("CREATE SECRET" in query for query in queries)
     attach = next(query for query in queries if "ATTACH" in query)
     assert "CREATE_IF_NOT_EXISTS false" in attach
     assert "READ_ONLY" not in attach
     assert not any("DETACH" in query for query in queries)
     assert all("secret" not in query for query in queries)
+
+
+def test_filesystem_executor_overrides_data_path_without_s3_setup() -> None:
+    connection = FakeConnection()
+    metadata = MetadataConfiguration(
+        backend_hint="postgres",
+        host="catalog.example",
+        port=5432,
+        username="user",
+        password="password",
+        database="lake",
+    )
+    storage = StorageConfiguration(
+        provider="filesystem",
+        data_path="/srv/lakes/atlas/",
+    )
+
+    execute_treatment(
+        metadata,
+        storage,
+        ResourceEnvelope(4, "4GB", 4_000_000_000),
+        selection(TreatmentKind.MERGE, max_compacted_files=3),
+        connect=lambda: connection,
+    )
+
+    queries = [query for query, _parameters in connection.queries]
+    assert not any("httpfs" in query for query in queries)
+    assert not any("CREATE SECRET" in query for query in queries)
+    attach = next(query for query in queries if "ATTACH" in query)
+    assert "DATA_PATH '/srv/lakes/atlas/'" in attach
+    assert "OVERRIDE_DATA_PATH true" in attach
 
 
 @pytest.mark.parametrize(

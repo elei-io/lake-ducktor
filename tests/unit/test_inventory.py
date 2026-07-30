@@ -5,8 +5,10 @@ from lakeducktor.config import MetadataConfiguration
 from lakeducktor.inventory import (
     CompatibleFileGroupRow,
     DuckDBInventorySource,
+    InlinedDataRow,
     LakeSummaryRow,
     TableInventoryRow,
+    _cleanup_eligible_files,
     collect_inventory,
     inventory_catalog,
 )
@@ -20,8 +22,15 @@ from lakeducktor.model import (
 class FakeInventorySource:
     def __init__(self) -> None:
         self.summaries: dict[str, LakeSummaryRow] = {
-            "lake_a": (11, 1_700_000_000_000, 2, 1_699_999_000_000),
-            "lake_b": (None, None, 0, None),
+            "lake_a": (
+                11,
+                1_700_000_000_000,
+                2,
+                1_699_999_000_000,
+                "1 week",
+                "1 month",
+            ),
+            "lake_b": (None, None, 0, None, None, None),
         }
         self.table_rows: dict[str, tuple[TableInventoryRow, ...]] = {
             "lake_a": (
@@ -51,12 +60,17 @@ class FakeInventorySource:
                     4,
                     6,
                     5,
+                    10,
                 ),
             ),
             "lake_b": (),
         }
         self.group_rows: dict[str, tuple[CompatibleFileGroupRow, ...]] = {
             "lake_a": ((7, 1, None, 3, 600, 3, 600),),
+            "lake_b": (),
+        }
+        self.inlined_rows: dict[str, tuple[InlinedDataRow, ...]] = {
+            "lake_a": ((7, 50, 1_024),),
             "lake_b": (),
         }
 
@@ -72,6 +86,9 @@ class FakeInventorySource:
     ) -> Iterable[CompatibleFileGroupRow]:
         return self.group_rows[metadata_schema]
 
+    def inlined_data(self, metadata_schema: str) -> Iterable[InlinedDataRow]:
+        return self.inlined_rows[metadata_schema]
+
 
 def test_inventory_builds_immutable_physical_facts_without_a_connection() -> None:
     inventory = collect_inventory(
@@ -86,6 +103,8 @@ def test_inventory_builds_immutable_physical_facts_without_a_connection() -> Non
     assert lake.latest_snapshot_at.timestamp() == 1_700_000_000
     assert lake.scheduled_files == 2
     assert lake.oldest_scheduled_at is not None
+    assert lake.delete_older_than == "1 week"
+    assert lake.expire_older_than == "1 month"
 
     table = lake.tables[0]
     assert (table.metadata_schema, table.table_id) == ("lake_a", 7)
@@ -112,6 +131,9 @@ def test_inventory_builds_immutable_physical_facts_without_a_connection() -> Non
     assert table.rewrite_delete_bytes == 20
     assert table.rewrite_deleted_rows == 4
     assert table.rewrite_original_rows == 6
+    assert table.data_inlining_row_limit == 10
+    assert table.inlined_data_rows == 50
+    assert table.inlined_data_bytes == 1_024
     assert len(table.compatible_file_groups) == 1
     group = table.compatible_file_groups[0]
     assert group.schema_version == 1
@@ -162,6 +184,27 @@ def test_merge_groups_exclude_files_native_compaction_will_skip() -> None:
     assert '"lake"."ducklake_inlined_delete_7"' in query
 
 
+def test_inlined_data_counts_live_rows_and_serialized_bytes_by_table() -> None:
+    connection = Mock()
+    mapping = Mock()
+    mapping.fetchall.return_value = [
+        (7, "ducklake_inlined_data_7_1"),
+        (7, "ducklake_inlined_data_7_2"),
+    ]
+    summary = Mock()
+    summary.fetchall.return_value = [(7, 50, 1_024)]
+    connection.execute.side_effect = [mapping, summary]
+
+    rows = tuple(DuckDBInventorySource(connection, "catalog").inlined_data("lake"))
+
+    assert rows == ((7, 50, 1_024),)
+    query = connection.execute.call_args_list[1].args[0]
+    assert '"lake"."ducklake_inlined_data_7_1"' in query
+    assert '"lake"."ducklake_inlined_data_7_2"' in query
+    assert "end_snapshot IS NULL" in query
+    assert "to_json(inlined_row)" in query
+
+
 def test_inventory_disables_checkpoint_on_shutdown_before_attaching() -> None:
     connection = Mock()
     connection.execute.return_value = connection
@@ -191,3 +234,39 @@ def test_inventory_disables_checkpoint_on_shutdown_before_attaching() -> None:
     queries = [call.args[0] for call in connection.execute.call_args_list]
     assert queries[0] == "PRAGMA disable_checkpoint_on_shutdown"
     assert connection.close.call_count == 1
+
+
+def test_cleanup_probe_delegates_policy_to_native_dry_run() -> None:
+    connection = Mock()
+    result = Mock()
+    result.fetchone.return_value = (7,)
+    connection.execute.side_effect = [
+        connection,
+        connection,
+        connection,
+        connection,
+        connection,
+        connection,
+        result,
+    ]
+    configuration = MetadataConfiguration(
+        backend_hint="postgres",
+        host="catalog.example",
+        port=5432,
+        username="user",
+        password="password",
+        database="lake",
+    )
+
+    with patch("lakeducktor.inventory.duckdb.connect", return_value=connection):
+        eligible = _cleanup_eligible_files(configuration, "lake")
+
+    assert eligible == 7
+    queries = [call.args[0] for call in connection.execute.call_args_list]
+    attach = next(query for query in queries if "ATTACH" in query)
+    cleanup = next(query for query in queries if "ducklake_cleanup_old_files" in query)
+    assert "READ_ONLY" in attach
+    assert "dry_run => true" in cleanup
+    assert "older_than" not in cleanup
+    assert "cleanup_all" not in cleanup
+    assert not any("DETACH" in query for query in queries)

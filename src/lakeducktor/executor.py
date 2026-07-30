@@ -13,6 +13,7 @@ from typing import Protocol
 import duckdb
 
 from lakeducktor.config import MetadataConfiguration, StorageConfiguration
+from lakeducktor.duckdb_config import connection_config
 from lakeducktor.model import (
     ResourceEnvelope,
     TreatmentKind,
@@ -22,6 +23,9 @@ from lakeducktor.model import (
 
 _TREATMENT_ALIAS = "lakeducktor_treatment"
 _STORAGE_SECRET = "lakeducktor_storage"
+_DUCKLAKE_MAX_RETRY_COUNT = 20
+_DUCKLAKE_RETRY_WAIT_MS = 100
+_DUCKLAKE_RETRY_BACKOFF = 1.2
 
 
 class ExecutionFailureReason(StrEnum):
@@ -70,7 +74,7 @@ type DuckDBConnectionFactory = Callable[[], duckdb.DuckDBPyConnection]
 
 
 def _connect_duckdb() -> duckdb.DuckDBPyConnection:
-    return duckdb.connect(database=":memory:")
+    return duckdb.connect(database=":memory:", config=connection_config())
 
 
 def _sql_string(value: str) -> str:
@@ -117,7 +121,52 @@ def execute_native_treatment(
 ) -> TreatmentResult:
     """Invoke DuckLake for exactly one selected table."""
 
-    if selection.kind is TreatmentKind.MERGE:
+    rows_processed = 0
+    if selection.kind is TreatmentKind.SCHEDULED_FILE_CLEANUP:
+        rows = connection.execute(
+            """
+            SELECT count(*)::BIGINT
+            FROM ducklake_cleanup_old_files(?)
+            """,
+            [_TREATMENT_ALIAS],
+        ).fetchall()
+        if len(rows) != 1 or len(rows[0]) != 1:
+            raise ExecutionError("DuckLake returned an invalid cleanup result")
+        return TreatmentResult(
+            files_processed=int(rows[0][0]),
+            files_created=0,
+        )
+    if (
+        selection.table_id is None
+        or selection.schema_name is None
+        or selection.table_name is None
+    ):
+        raise ExecutionError(
+            f"table-scoped treatment is missing its table: {selection.kind}"
+        )
+    if selection.kind is TreatmentKind.INLINE_FLUSH:
+        files_before = _active_table_file_count(connection, selection)
+        rows = connection.execute(
+            """
+            SELECT coalesce(sum(rows_flushed), 0)::BIGINT
+            FROM ducklake_flush_inlined_data(
+                ?,
+                table_name => ?,
+                schema_name => ?
+            )
+            """,
+            [
+                _TREATMENT_ALIAS,
+                selection.table_name,
+                selection.schema_name,
+            ],
+        ).fetchall()
+        if len(rows) != 1 or len(rows[0]) != 1:
+            raise ExecutionError("DuckLake returned an invalid treatment result")
+        rows_processed = int(rows[0][0])
+        files_after = _active_table_file_count(connection, selection)
+        rows = [(0, max(0, files_after - files_before))]
+    elif selection.kind is TreatmentKind.MERGE:
         if selection.max_compacted_files is None or selection.max_compacted_files <= 0:
             raise ExecutionError("merge treatment is missing max_compacted_files")
         if (
@@ -172,7 +221,34 @@ def execute_native_treatment(
     return TreatmentResult(
         files_processed=int(row[0]),
         files_created=int(row[1]),
+        rows_processed=rows_processed,
     )
+
+
+def _active_table_file_count(
+    connection: TreatmentConnection,
+    selection: TreatmentSelection,
+) -> int:
+    rows = connection.execute(
+        """
+        SELECT
+            count(DISTINCT data_file)::BIGINT
+            + count(DISTINCT delete_file)::BIGINT
+        FROM ducklake_list_files(
+            ?,
+            ?,
+            schema => ?
+        )
+        """,
+        [
+            _TREATMENT_ALIAS,
+            selection.table_name,
+            selection.schema_name,
+        ],
+    ).fetchall()
+    if len(rows) != 1 or len(rows[0]) != 1:
+        raise ExecutionError("DuckLake returned an invalid active-file count")
+    return int(rows[0][0])
 
 
 def execute_treatment(
@@ -190,9 +266,26 @@ def execute_treatment(
         connection.execute("PRAGMA disable_checkpoint_on_shutdown")
         connection.execute("SET threads = ?", [envelope.duckdb_threads])
         connection.execute("SET memory_limit = ?", [envelope.duckdb_memory])
-        for extension in ("httpfs", "postgres", "ducklake"):
+        extensions = (
+            ("httpfs", "postgres", "ducklake")
+            if storage.provider == "s3-compatible"
+            else ("postgres", "ducklake")
+        )
+        for extension in extensions:
             connection.execute(f"INSTALL {extension}")
             connection.execute(f"LOAD {extension}")
+        connection.execute(
+            "SET ducklake_max_retry_count = ?",
+            [_DUCKLAKE_MAX_RETRY_COUNT],
+        )
+        connection.execute(
+            "SET ducklake_retry_wait_ms = ?",
+            [_DUCKLAKE_RETRY_WAIT_MS],
+        )
+        connection.execute(
+            "SET ducklake_retry_backoff = ?",
+            [_DUCKLAKE_RETRY_BACKOFF],
+        )
         if selection.kind is TreatmentKind.MERGE:
             if (
                 selection.execution_target_file_size_bytes is None
@@ -203,35 +296,43 @@ def execute_treatment(
                 "SET ducklake_target_file_size = ?",
                 [f"{selection.execution_target_file_size_bytes}B"],
             )
-        connection.execute(
-            f"""
-            CREATE SECRET {_STORAGE_SECRET} (
-                TYPE s3,
-                KEY_ID ?,
-                SECRET ?,
-                REGION ?,
-                ENDPOINT ?,
-                URL_STYLE 'path',
-                USE_SSL ?,
-                SCOPE ?
+        if storage.provider == "s3-compatible":
+            connection.execute(
+                f"""
+                CREATE SECRET {_STORAGE_SECRET} (
+                    TYPE s3,
+                    KEY_ID ?,
+                    SECRET ?,
+                    REGION ?,
+                    ENDPOINT ?,
+                    URL_STYLE 'path',
+                    USE_SSL ?,
+                    SCOPE ?
+                )
+                """,
+                [
+                    storage.access_key_id,
+                    storage.secret_access_key,
+                    storage.region,
+                    storage.endpoint,
+                    storage.use_ssl,
+                    f"s3://{storage.bucket}",
+                ],
             )
-            """,
-            [
-                storage.access_key_id,
-                storage.secret_access_key,
-                storage.region,
-                storage.endpoint,
-                storage.use_ssl,
-                f"s3://{storage.bucket}",
-            ],
-        )
         uri = _sql_string(metadata.postgres_uri())
         metadata_schema = _sql_string(selection.metadata_schema)
+        storage_options = ""
+        if storage.provider == "filesystem":
+            if storage.data_path is None:
+                raise ExecutionError("filesystem storage is missing its data path")
+            data_path = _sql_string(storage.data_path)
+            storage_options = f", DATA_PATH '{data_path}', OVERRIDE_DATA_PATH true"
         connection.execute(
             f"""
             ATTACH 'ducklake:postgres:{uri}' AS {_TREATMENT_ALIAS} (
                 METADATA_SCHEMA '{metadata_schema}',
                 CREATE_IF_NOT_EXISTS false
+                {storage_options}
             )
             """
         )
@@ -258,7 +359,14 @@ def _isolated_child(
 ) -> None:
     try:
         result = execute_treatment(metadata, storage, envelope, selection)
-        result_pipe.send(("success", result.files_processed, result.files_created))
+        result_pipe.send(
+            (
+                "success",
+                result.files_processed,
+                result.files_created,
+                result.rows_processed,
+            )
+        )
     except ExecutionError as error:
         result_pipe.send(("error", error.reason.value, str(error)))
     except BaseException as error:
@@ -324,6 +432,7 @@ class IsolatedTreatmentExecutor:
             return TreatmentResult(
                 files_processed=int(message[1]),
                 files_created=int(message[2]),
+                rows_processed=int(message[3]),
             )
         reason = ExecutionFailureReason(str(message[1]))
         raise ExecutionError(str(message[2]), reason=reason)

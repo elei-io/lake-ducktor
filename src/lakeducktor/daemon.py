@@ -173,6 +173,11 @@ def _selected_table_input_files(
     selection: TreatmentSelection,
 ) -> int | None:
     for lake in inventory.lakes:
+        if (
+            selection.kind is TreatmentKind.SCHEDULED_FILE_CLEANUP
+            and lake.metadata_schema == selection.metadata_schema
+        ):
+            return lake.cleanup_eligible_files
         for table in lake.tables:
             if (
                 table.metadata_schema == selection.metadata_schema
@@ -180,6 +185,8 @@ def _selected_table_input_files(
             ):
                 if selection.kind is TreatmentKind.DELETE_REWRITE:
                     return table.rewrite_data_files
+                if selection.kind is TreatmentKind.INLINE_FLUSH:
+                    return table.inlined_data_rows
                 return sum(
                     group.merge_candidate_files
                     for group in table.compatible_file_groups
@@ -201,6 +208,18 @@ def _still_actionable(
     diagnosis,
     selection: TreatmentSelection,
 ) -> tuple[bool, bool]:
+    if selection.kind is TreatmentKind.SCHEDULED_FILE_CLEANUP:
+        lake = next(
+            (
+                lake
+                for lake in diagnosis.lakes
+                if lake.metadata_schema == selection.metadata_schema
+            ),
+            None,
+        )
+        if lake is None:
+            return False, False
+        return True, lake.cleanup_eligible_files > 0
     table = next(
         (
             table
@@ -217,6 +236,8 @@ def _still_actionable(
         return True, False
     if selection.kind is TreatmentKind.DELETE_REWRITE:
         return True, table.rewrite_data_files > 0
+    if selection.kind is TreatmentKind.INLINE_FLUSH:
+        return True, (table.inlined_data_rows >= table.inline_flush_threshold_rows)
     return True, table.expected_files_eliminated > 0
 
 
@@ -246,7 +267,7 @@ def maintain_once(
 ) -> MaintenanceOutcome:
     """Claim, revalidate, and execute at most one treatment."""
 
-    unavailable: set[tuple[str, int]] = set()
+    unavailable: set[tuple[str, int | None]] = set()
     claim_contention = 0
     try:
         while True:
@@ -274,8 +295,13 @@ def maintain_once(
                 break
             claim_contention += 1
             unavailable.update(
-                (candidate.metadata_schema, candidate.table_id)
+                (
+                    candidate.metadata_schema,
+                    getattr(candidate, "table_id", None),
+                )
                 for candidate in (
+                    *initial_plan.scheduled_file_cleanups,
+                    *initial_plan.inline_flushes,
                     *initial_plan.delete_rewrites,
                     *initial_plan.merges,
                 )
@@ -317,17 +343,20 @@ def maintain_once(
                 selection = revalidated
                 _LOGGER.info(
                     "treatment_started kind=%s lake=%s table_id=%s "
-                    "schema=%r table=%r input_files=%s input_bytes=%s "
+                    "schema=%r table=%r input_files=%s input_rows=%s "
+                    "input_bytes=%s "
                     "lake_target_bytes=%s execution_target_bytes=%s "
                     "admitted_bytes=%s "
                     "sorting_enabled=%s memory_headroom_bytes=%s "
-                    "usable_memory_bytes=%s max_compacted_files=%s",
+                    "usable_memory_bytes=%s max_compacted_files=%s "
+                    "retention_policy=%s",
                     selection.kind.value,
                     selection.metadata_schema,
                     selection.table_id,
                     selection.schema_name,
                     selection.table_name,
                     selection.input_files,
+                    selection.input_rows,
                     selection.input_bytes,
                     selection.lake_target_file_size_bytes
                     if selection.lake_target_file_size_bytes is not None
@@ -341,6 +370,9 @@ def maintain_once(
                     selection.usable_memory_bytes,
                     selection.max_compacted_files
                     if selection.max_compacted_files is not None
+                    else "none",
+                    selection.retention_policy
+                    if selection.retention_policy is not None
                     else "none",
                 )
                 if observer is not None:
@@ -432,12 +464,14 @@ def maintain_once(
                     )
                 _LOGGER.info(
                     "treatment_native_completed kind=%s lake=%s table_id=%s "
-                    "files_processed=%s files_created=%s duration_seconds=%.3f",
+                    "files_processed=%s files_created=%s rows_processed=%s "
+                    "duration_seconds=%.3f",
                     selection.kind.value,
                     selection.metadata_schema,
                     selection.table_id,
                     result.files_processed,
                     result.files_created,
+                    result.rows_processed,
                     duration_seconds,
                 )
                 _, verification, _ = _fresh_state(
@@ -521,11 +555,13 @@ def maintenance_cycle(
             )
         _LOGGER.info(
             "cycle metadata_backend=%s lakes=%s tables=%s "
-            "actionable_tables=%s runnable=%s blocked=%s memory_deferred=%s",
+            "actionable_tables=%s cleanup_eligible_files=%s "
+            "runnable=%s blocked=%s memory_deferred=%s",
             detection.backend.value,
             len(detection.metadata_schemas),
             current_inventory.table_count,
             sum(lake.actionable_tables for lake in diagnosis.lakes),
+            sum(lake.cleanup_eligible_files for lake in diagnosis.lakes),
             plan.runnable,
             plan.blocked,
             decision.memory_deferred,
@@ -618,6 +654,7 @@ def run_loop(
                     and outcome.result is not None
                     and outcome.result.files_processed == 0
                     and outcome.result.files_created == 0
+                    and outcome.result.rows_processed == 0
                 ):
                     should_wait = True
                     _LOGGER.warning(

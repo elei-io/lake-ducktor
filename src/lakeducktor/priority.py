@@ -8,9 +8,11 @@ from lakeducktor.model import (
     CatalogDiagnosis,
     DeleteRewritePriority,
     DiagnosisState,
+    InlineFlushPriority,
     MergePriority,
     PriorityPlan,
     PriorityState,
+    ScheduledFileCleanupPriority,
     TableDiagnosis,
     TreatmentKind,
 )
@@ -42,7 +44,59 @@ def _tables(diagnosis: CatalogDiagnosis) -> tuple[TableDiagnosis, ...]:
 def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
     """Create separate, explainable rewrite and merge rankings."""
 
+    cleanup_lakes = [
+        lake for lake in diagnosis.lakes if lake.cleanup_eligible_files > 0
+    ]
+    cleanup_lakes.sort(
+        key=lambda lake: (
+            lake.oldest_scheduled_at is None,
+            lake.oldest_scheduled_at,
+            -lake.cleanup_eligible_files,
+            lake.metadata_schema,
+        )
+    )
+    scheduled_file_cleanups = tuple(
+        ScheduledFileCleanupPriority(
+            rank=rank,
+            metadata_schema=lake.metadata_schema,
+            eligible_files=lake.cleanup_eligible_files,
+            scheduled_files=lake.scheduled_files,
+            oldest_scheduled_at=lake.oldest_scheduled_at,
+            delete_older_than=lake.delete_older_than,
+        )
+        for rank, lake in enumerate(cleanup_lakes, start=1)
+    )
     tables = _tables(diagnosis)
+    flush_tables = [
+        table
+        for table in tables
+        if table.state is DiagnosisState.ACTIONABLE
+        and table.inlined_data_rows >= table.inline_flush_threshold_rows
+    ]
+    flush_tables.sort(
+        key=lambda table: (
+            -Fraction(table.inlined_data_rows, table.inline_flush_threshold_rows),
+            -table.inlined_data_rows,
+            table.inlined_data_bytes,
+            table.metadata_schema,
+            table.table_id,
+        )
+    )
+    inline_flushes = tuple(
+        InlineFlushPriority(
+            rank=rank,
+            metadata_schema=table.metadata_schema,
+            table_id=table.table_id,
+            schema_name=table.schema_name,
+            table_name=table.table_name,
+            inlined_rows=table.inlined_data_rows,
+            input_bytes=table.inlined_data_bytes,
+            threshold_rows=table.inline_flush_threshold_rows,
+            data_inlining_row_limit=table.data_inlining_row_limit,
+            sorting_enabled=table.sorting_enabled,
+        )
+        for rank, table in enumerate(flush_tables, start=1)
+    )
     rewrite_tables = [
         table
         for table in tables
@@ -93,6 +147,9 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
     rewrite_keys = {
         (candidate.metadata_schema, candidate.table_id) for candidate in delete_rewrites
     }
+    flush_keys = {
+        (candidate.metadata_schema, candidate.table_id) for candidate in inline_flushes
+    }
     merge_tables = [
         table
         for table in tables
@@ -106,7 +163,8 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
             )
 
     def merge_key(table: TableDiagnosis) -> tuple:
-        blocked = (table.metadata_schema, table.table_id) in rewrite_keys
+        key = (table.metadata_schema, table.table_id)
+        blocked = key in rewrite_keys or key in flush_keys
         adjusted_eliminations = Fraction(
             table.expected_files_eliminated
         ) - merge_activity_penalty(table.recent_data_files_60s)
@@ -140,11 +198,16 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
                 table_name=table.table_name,
                 state=(
                     PriorityState.BLOCKED
-                    if (table.metadata_schema, table.table_id) in rewrite_keys
+                    if (
+                        (table.metadata_schema, table.table_id) in rewrite_keys
+                        or (table.metadata_schema, table.table_id) in flush_keys
+                    )
                     else PriorityState.RUNNABLE
                 ),
                 blocked_by=(
-                    TreatmentKind.DELETE_REWRITE
+                    TreatmentKind.INLINE_FLUSH
+                    if (table.metadata_schema, table.table_id) in flush_keys
+                    else TreatmentKind.DELETE_REWRITE
                     if (table.metadata_schema, table.table_id) in rewrite_keys
                     else None
                 ),
@@ -172,4 +235,6 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
         attention_tables=sum(
             table.state is DiagnosisState.ATTENTION for table in tables
         ),
+        inline_flushes=inline_flushes,
+        scheduled_file_cleanups=scheduled_file_cleanups,
     )

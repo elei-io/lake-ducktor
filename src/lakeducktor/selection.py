@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from lakeducktor.model import (
     DeleteRewritePriority,
+    InlineFlushPriority,
     MergePriority,
     PriorityPlan,
     PriorityState,
     ResourceEnvelope,
+    ScheduledFileCleanupPriority,
     SelectionDecision,
     SelectionReason,
     TreatmentKind,
@@ -23,6 +25,33 @@ _MINIMUM_BYTES_PER_THREAD = 125_000_000
 _MAXIMUM_MERGE_INPUT_FILES = 512
 _UNSORTED_HEADROOM_DIVISOR = 4
 _SORTED_HEADROOM_DIVISOR = 2
+
+
+def _scheduled_file_cleanup_selection(
+    candidate: ScheduledFileCleanupPriority,
+    envelope: ResourceEnvelope,
+) -> TreatmentSelection:
+    if candidate.eligible_files <= 0:
+        raise SelectionError(
+            "scheduled-file cleanup has no eligible files for "
+            f"lake={candidate.metadata_schema}"
+        )
+    return TreatmentSelection(
+        kind=TreatmentKind.SCHEDULED_FILE_CLEANUP,
+        priority_rank=candidate.rank,
+        metadata_schema=candidate.metadata_schema,
+        table_id=None,
+        schema_name=None,
+        table_name=None,
+        input_bytes=0,
+        admitted_bytes=0,
+        sorting_enabled=False,
+        memory_headroom_bytes=0,
+        usable_memory_bytes=envelope.duckdb_memory_bytes,
+        max_compacted_files=None,
+        input_files=candidate.eligible_files,
+        retention_policy=candidate.delete_older_than or "native_default",
+    )
 
 
 def treatment_memory_budget(
@@ -74,6 +103,37 @@ def _rewrite_selection(
         usable_memory_bytes=usable_memory,
         max_compacted_files=None,
         input_files=candidate.data_files,
+    )
+
+
+def _inline_flush_selection(
+    candidate: InlineFlushPriority,
+    envelope: ResourceEnvelope,
+) -> TreatmentSelection | None:
+    if candidate.inlined_rows <= 0 or candidate.input_bytes <= 0:
+        raise SelectionError(
+            f"inline flush has invalid input for table_id={candidate.table_id}"
+        )
+    headroom, usable_memory = treatment_memory_budget(
+        envelope,
+        candidate.sorting_enabled,
+    )
+    if candidate.input_bytes > usable_memory:
+        return None
+    return TreatmentSelection(
+        kind=TreatmentKind.INLINE_FLUSH,
+        priority_rank=candidate.rank,
+        metadata_schema=candidate.metadata_schema,
+        table_id=candidate.table_id,
+        schema_name=candidate.schema_name,
+        table_name=candidate.table_name,
+        input_bytes=candidate.input_bytes,
+        admitted_bytes=candidate.input_bytes,
+        sorting_enabled=candidate.sorting_enabled,
+        memory_headroom_bytes=headroom,
+        usable_memory_bytes=usable_memory,
+        max_compacted_files=None,
+        input_rows=candidate.inlined_rows,
     )
 
 
@@ -148,17 +208,37 @@ def _merge_selection(
 def select_treatment(
     plan: PriorityPlan,
     envelope: ResourceEnvelope,
-    unavailable_tables: frozenset[tuple[str, int]] = frozenset(),
+    unavailable_tables: frozenset[tuple[str, int | None]] = frozenset(),
 ) -> SelectionDecision:
     """Choose one treatment using fixed lane order and memory admission."""
 
     if envelope.duckdb_threads <= 0 or envelope.duckdb_memory_bytes <= 0:
         raise SelectionError("resource envelope must be greater than zero")
 
+    fitting_cleanups: list[TreatmentSelection] = []
     fitting_rewrites: list[TreatmentSelection] = []
+    fitting_flushes: list[TreatmentSelection] = []
     fitting_merges: list[TreatmentSelection] = []
     memory_deferred = 0
     available_runnable = 0
+
+    for candidate in plan.scheduled_file_cleanups:
+        key = (candidate.metadata_schema, None)
+        if key in unavailable_tables:
+            continue
+        available_runnable += 1
+        fitting_cleanups.append(_scheduled_file_cleanup_selection(candidate, envelope))
+
+    for candidate in plan.inline_flushes:
+        key = (candidate.metadata_schema, candidate.table_id)
+        if key in unavailable_tables:
+            continue
+        available_runnable += 1
+        selection = _inline_flush_selection(candidate, envelope)
+        if selection is None:
+            memory_deferred += 1
+        else:
+            fitting_flushes.append(selection)
 
     for candidate in plan.delete_rewrites:
         key = (candidate.metadata_schema, candidate.table_id)
@@ -184,7 +264,10 @@ def select_treatment(
         else:
             fitting_merges.append(selection)
 
-    selected = next(iter(fitting_rewrites or fitting_merges), None)
+    selected = next(
+        iter(fitting_cleanups or fitting_rewrites or fitting_flushes or fitting_merges),
+        None,
+    )
     if selected is not None:
         reason = SelectionReason.SELECTED
     elif available_runnable:
@@ -207,6 +290,16 @@ def readmit_treatment(
     """Re-admit the same treatment from freshly diagnosed state."""
 
     key = (previous.metadata_schema, previous.table_id)
+    if previous.kind is TreatmentKind.SCHEDULED_FILE_CLEANUP:
+        for candidate in plan.scheduled_file_cleanups:
+            if candidate.metadata_schema == previous.metadata_schema:
+                return _scheduled_file_cleanup_selection(candidate, envelope)
+        return None
+    if previous.kind is TreatmentKind.INLINE_FLUSH:
+        for candidate in plan.inline_flushes:
+            if (candidate.metadata_schema, candidate.table_id) == key:
+                return _inline_flush_selection(candidate, envelope)
+        return None
     if previous.kind is TreatmentKind.DELETE_REWRITE:
         for candidate in plan.delete_rewrites:
             if (candidate.metadata_schema, candidate.table_id) == key:

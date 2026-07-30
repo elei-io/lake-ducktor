@@ -27,6 +27,8 @@ class DiagnosisState(StrEnum):
 
 
 class TreatmentKind(StrEnum):
+    SCHEDULED_FILE_CLEANUP = "scheduled_file_cleanup"
+    INLINE_FLUSH = "inline_flush"
     DELETE_REWRITE = "delete_rewrite"
     MERGE = "merge"
 
@@ -116,6 +118,9 @@ class TableInventory:
     rewrite_delete_bytes: int
     rewrite_deleted_rows: int
     rewrite_original_rows: int
+    data_inlining_row_limit: int = 10
+    inlined_data_rows: int = 0
+    inlined_data_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +131,9 @@ class LakeInventory:
     scheduled_files: int
     oldest_scheduled_at: datetime | None
     tables: tuple[TableInventory, ...]
+    cleanup_eligible_files: int = 0
+    delete_older_than: str | None = None
+    expire_older_than: str | None = None
 
     @property
     def table_count(self) -> int:
@@ -204,6 +212,10 @@ class TableDiagnosis:
     rewrite_original_rows: int
     dangling_delete_files: int
     minimum_merge_candidate_file_bytes: int = 0
+    data_inlining_row_limit: int = 10
+    inline_flush_threshold_rows: int = 50
+    inlined_data_rows: int = 0
+    inlined_data_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +224,10 @@ class LakeDiagnosis:
     state: DiagnosisState
     scheduled_files: int
     tables: tuple[TableDiagnosis, ...]
+    cleanup_eligible_files: int = 0
+    oldest_scheduled_at: datetime | None = None
+    delete_older_than: str | None = None
+    expire_older_than: str | None = None
 
     @property
     def actionable_tables(self) -> int:
@@ -271,16 +287,47 @@ class MergePriority:
 
 
 @dataclass(frozen=True, slots=True)
+class InlineFlushPriority:
+    rank: int
+    metadata_schema: str
+    table_id: int
+    schema_name: str
+    table_name: str
+    inlined_rows: int
+    input_bytes: int
+    threshold_rows: int
+    data_inlining_row_limit: int
+    sorting_enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduledFileCleanupPriority:
+    rank: int
+    metadata_schema: str
+    eligible_files: int
+    scheduled_files: int
+    oldest_scheduled_at: datetime | None
+    delete_older_than: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class PriorityPlan:
     delete_rewrites: tuple[DeleteRewritePriority, ...]
     merges: tuple[MergePriority, ...]
     excluded_tables: int
     attention_tables: int
+    inline_flushes: tuple[InlineFlushPriority, ...] = ()
+    scheduled_file_cleanups: tuple[ScheduledFileCleanupPriority, ...] = ()
 
     @property
     def runnable(self) -> int:
-        return len(self.delete_rewrites) + sum(
-            candidate.state is PriorityState.RUNNABLE for candidate in self.merges
+        return (
+            len(self.scheduled_file_cleanups)
+            + len(self.inline_flushes)
+            + len(self.delete_rewrites)
+            + sum(
+                candidate.state is PriorityState.RUNNABLE for candidate in self.merges
+            )
         )
 
     @property
@@ -302,9 +349,9 @@ class TreatmentSelection:
     kind: TreatmentKind
     priority_rank: int
     metadata_schema: str
-    table_id: int
-    schema_name: str
-    table_name: str
+    table_id: int | None
+    schema_name: str | None
+    table_name: str | None
     input_bytes: int
     admitted_bytes: int
     sorting_enabled: bool
@@ -314,6 +361,8 @@ class TreatmentSelection:
     input_files: int = 0
     lake_target_file_size_bytes: int | None = None
     execution_target_file_size_bytes: int | None = None
+    input_rows: int = 0
+    retention_policy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +377,7 @@ class SelectionDecision:
 class TreatmentResult:
     files_processed: int
     files_created: int
+    rows_processed: int = 0
 
 
 @dataclass(frozen=True, slots=True)

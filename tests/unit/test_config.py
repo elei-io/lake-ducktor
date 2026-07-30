@@ -81,6 +81,29 @@ def test_s3_compatible_storage_configuration_parses_endpoint() -> None:
     assert configuration.bucket == "lake"
 
 
+def test_filesystem_storage_configuration_requires_an_absolute_path() -> None:
+    configuration = StorageConfiguration.from_environment(
+        {
+            "CATALOG_STORAGE": "filesystem",
+            "CATALOG_DATA_PATH": "/srv/lakes/atlas",
+        }
+    )
+
+    assert configuration.provider == "filesystem"
+    assert configuration.data_path == "/srv/lakes/atlas/"
+    assert configuration.endpoint == ""
+
+
+def test_relative_filesystem_storage_path_is_rejected() -> None:
+    with pytest.raises(ConfigurationError, match="must be absolute"):
+        StorageConfiguration.from_environment(
+            {
+                "CATALOG_STORAGE": "filesystem",
+                "CATALOG_DATA_PATH": "lakes/atlas",
+            }
+        )
+
+
 def test_storage_endpoint_path_is_rejected() -> None:
     with pytest.raises(ConfigurationError, match="must not contain"):
         StorageConfiguration.from_environment(

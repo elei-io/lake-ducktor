@@ -129,6 +129,7 @@ def test_inventory_command_logs_aggregate_physical_facts(
                     active_data_bytes=1_024,
                     active_delete_files=3,
                     active_delete_bytes=128,
+                    tables=(),
                     dangling_delete_files=1,
                     scheduled_files=2,
                 ),
@@ -140,6 +141,7 @@ def test_inventory_command_logs_aggregate_physical_facts(
                     active_data_bytes=0,
                     active_delete_files=0,
                     active_delete_bytes=0,
+                    tables=(),
                     dangling_delete_files=0,
                     scheduled_files=0,
                 ),
@@ -154,7 +156,9 @@ def test_inventory_command_logs_aggregate_physical_facts(
     assert (
         "detected lake=lake_a snapshot=11 tables=4 active_data_files=12 "
         "active_data_bytes=1024 active_delete_files=3 active_delete_bytes=128 "
-        "dangling_delete_files=1 scheduled_files=2"
+        "inlined_data_rows=0 inlined_data_bytes=0 "
+        "dangling_delete_files=1 scheduled_files=2 cleanup_eligible_files=0 "
+        "delete_older_than=native_default expire_older_than=unset"
     ) in [record.getMessage() for record in caplog.records]
 
 
@@ -186,6 +190,7 @@ def test_diagnose_command_logs_lake_and_table_explanations(
         active_data_bytes=160,
         active_delete_files=0,
         active_delete_bytes=0,
+        tables=(),
         dangling_delete_files=0,
         scheduled_files=0,
     )
@@ -202,6 +207,10 @@ def test_diagnose_command_logs_lake_and_table_explanations(
         reasons=("merge_pressure",),
         sorting_enabled=False,
         merge_groups=1,
+        data_inlining_row_limit=10,
+        inline_flush_threshold_rows=50,
+        inlined_data_rows=0,
+        inlined_data_bytes=0,
         merge_input_files=4,
         merge_input_bytes=160,
         expected_files_eliminated=2,
@@ -235,7 +244,9 @@ def test_diagnose_command_logs_lake_and_table_explanations(
     messages = [record.getMessage() for record in caplog.records]
     assert (
         "diagnosis lake=lake_a state=actionable actionable_tables=1 "
-        "excluded_tables=0 attention_tables=0 scheduled_files=0"
+        "excluded_tables=0 attention_tables=0 scheduled_files=0 "
+        "cleanup_eligible_files=0 delete_older_than=native_default "
+        "expire_older_than=unset"
     ) in messages
     assert any(
         message.startswith(
@@ -274,6 +285,7 @@ def test_prioritize_command_logs_separate_treatment_lanes(
         active_data_bytes=160,
         active_delete_files=2,
         active_delete_bytes=10,
+        tables=(),
         dangling_delete_files=0,
         scheduled_files=0,
     )
@@ -320,6 +332,8 @@ def test_prioritize_command_logs_separate_treatment_lanes(
     monkeypatch.setattr(
         "lakeducktor.cli.prioritize",
         lambda _diagnosis: SimpleNamespace(
+            scheduled_file_cleanups=(),
+            inline_flushes=(),
             delete_rewrites=(rewrite,),
             merges=(merge,),
             runnable=1,
@@ -349,7 +363,9 @@ def test_prioritize_command_logs_separate_treatment_lanes(
         for message in messages
     )
     assert (
-        "priority_summary delete_rewrites=1 merges=1 runnable=1 blocked=1 "
+        "priority_summary scheduled_file_cleanups=0 inline_flushes=0 "
+        "delete_rewrites=1 merges=1 "
+        "runnable=1 blocked=1 "
         "excluded=0 attention=0"
     ) in messages
 
@@ -382,6 +398,7 @@ def test_select_command_logs_resource_envelope_and_one_treatment(
         active_data_bytes=0,
         active_delete_files=0,
         active_delete_bytes=0,
+        tables=(),
         dangling_delete_files=0,
         scheduled_files=0,
     )
@@ -433,10 +450,11 @@ def test_select_command_logs_resource_envelope_and_one_treatment(
     ) in messages
     assert (
         "selected treatment=merge priority_rank=1 lake=lake_a table_id=7 "
-        "schema='main' table='events' input_bytes=1000 admitted_bytes=512 "
+        "schema='main' table='events' input_bytes=1000 input_rows=0 "
+        "admitted_bytes=512 "
         "sorting_enabled=false memory_headroom_bytes=1000000000 "
         "usable_memory_bytes=3000000000 "
-        "max_compacted_files=1 memory_deferred=2"
+        "max_compacted_files=1 retention_policy=none memory_deferred=2"
     ) in messages
 
 
@@ -479,6 +497,7 @@ def test_maintain_command_logs_verified_treatment_outcome(
         active_data_bytes=0,
         active_delete_files=0,
         active_delete_bytes=0,
+        tables=(),
         dangling_delete_files=0,
         scheduled_files=0,
     )
@@ -531,7 +550,8 @@ def test_maintain_command_logs_verified_treatment_outcome(
     messages = [record.getMessage() for record in caplog.records]
     assert (
         "treatment_completed kind=merge lake=lake_a table_id=7 "
-        "files_processed=4 files_created=1 duration_seconds=12.500 "
+        "files_processed=4 files_created=1 rows_processed=0 "
+        "duration_seconds=12.500 "
         "sorting_enabled=false "
         "table_present=true still_actionable=false claim_contention=1"
     ) in messages

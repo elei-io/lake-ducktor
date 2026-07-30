@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Protocol
 
 import duckdb
 
 from lakeducktor.config import MetadataConfiguration
+from lakeducktor.duckdb_config import connection_config
 from lakeducktor.model import (
     BackendDetection,
     CatalogInventory,
@@ -20,8 +22,16 @@ from lakeducktor.model import (
 )
 
 _INVENTORY_ALIAS = "lakeducktor_inventory"
+_CLEANUP_PROBE_ALIAS = "lakeducktor_cleanup_probe"
 
-type LakeSummaryRow = tuple[int | None, int | None, int, int | None]
+type LakeSummaryRow = tuple[
+    int | None,
+    int | None,
+    int,
+    int | None,
+    str | None,
+    str | None,
+]
 type TableInventoryRow = tuple[
     int,
     str,
@@ -58,6 +68,7 @@ type CompatibleFileGroupRow = tuple[
     int,
     int,
 ]
+type InlinedDataRow = tuple[int, int, int]
 
 
 class InventoryError(RuntimeError):
@@ -78,6 +89,9 @@ class InventorySource(Protocol):
         metadata_schema: str,
     ) -> Iterable[CompatibleFileGroupRow]:
         """Return native merge compatibility groups for active data files."""
+
+    def inlined_data(self, metadata_schema: str) -> Iterable[InlinedDataRow]:
+        """Return active inlined rows and their serialized size by table."""
 
 
 def _identifier(value: str) -> str:
@@ -108,6 +122,7 @@ class DuckDBInventorySource:
 
     def lake_summary(self, metadata_schema: str) -> LakeSummaryRow:
         snapshots = self._relation(metadata_schema, "ducklake_snapshot")
+        metadata = self._relation(metadata_schema, "ducklake_metadata")
         scheduled = self._relation(
             metadata_schema,
             "ducklake_files_scheduled_for_deletion",
@@ -118,7 +133,19 @@ class DuckDBInventorySource:
                 max(snapshot_id),
                 epoch_ms(max(snapshot_time)),
                 (SELECT count(*) FROM {scheduled}),
-                (SELECT epoch_ms(min(schedule_start)) FROM {scheduled})
+                (SELECT epoch_ms(min(schedule_start)) FROM {scheduled}),
+                (
+                    SELECT value
+                    FROM {metadata}
+                    WHERE key = 'delete_older_than'
+                      AND scope IS NULL
+                ),
+                (
+                    SELECT value
+                    FROM {metadata}
+                    WHERE key = 'expire_older_than'
+                      AND scope IS NULL
+                )
             FROM {snapshots}
             """
         ).fetchone()
@@ -217,6 +244,30 @@ class DuckDBInventorySource:
                         ),
                         '0.95'
                     )::DOUBLE AS rewrite_delete_threshold
+                    ,
+                    coalesce(
+                        (
+                            SELECT value
+                            FROM {metadata}
+                            WHERE key = 'data_inlining_row_limit'
+                              AND scope = 'table'
+                              AND scope_id = tables.table_id
+                        ),
+                        (
+                            SELECT value
+                            FROM {metadata}
+                            WHERE key = 'data_inlining_row_limit'
+                              AND scope = 'schema'
+                              AND scope_id = schemas.schema_id
+                        ),
+                        (
+                            SELECT value
+                            FROM {metadata}
+                            WHERE key = 'data_inlining_row_limit'
+                              AND scope IS NULL
+                        ),
+                        '10'
+                    )::BIGINT AS data_inlining_row_limit
                 FROM {tables} AS tables
                 JOIN {schemas} AS schemas
                   ON schemas.schema_id = tables.schema_id
@@ -367,7 +418,8 @@ class DuckDBInventorySource:
                 coalesce(rewrite.delete_file_bytes, 0),
                 coalesce(rewrite.deleted_rows, 0),
                 coalesce(rewrite.original_rows, 0),
-                coalesce(recent.file_count, 0)
+                coalesce(recent.file_count, 0),
+                tables.data_inlining_row_limit
             FROM active_tables AS tables
             LEFT JOIN active_sorts AS sorts USING (table_id)
             LEFT JOIN data_file_summary AS data USING (table_id)
@@ -375,6 +427,43 @@ class DuckDBInventorySource:
             LEFT JOIN delete_file_summary AS deletes USING (table_id)
             LEFT JOIN rewrite_summary AS rewrite USING (table_id)
             ORDER BY tables.table_id
+            """
+        ).fetchall()
+
+    def inlined_data(self, metadata_schema: str) -> Iterable[InlinedDataRow]:
+        mapping = self._relation(metadata_schema, "ducklake_inlined_data_tables")
+        rows = self._connection.execute(
+            f"""
+            SELECT table_id, table_name
+            FROM {mapping}
+            ORDER BY table_id, schema_version
+            """
+        ).fetchall()
+        if not rows:
+            return ()
+        summaries = "\nUNION ALL\n".join(
+            f"""
+            SELECT
+                {int(row[0])}::BIGINT AS table_id,
+                count(*)::BIGINT AS active_rows,
+                coalesce(
+                    sum(length(to_json(inlined_row)::VARCHAR)),
+                    0
+                )::BIGINT AS active_bytes
+            FROM {self._relation(metadata_schema, str(row[1]))} AS inlined_row
+            WHERE end_snapshot IS NULL
+            """
+            for row in rows
+        )
+        return self._connection.execute(
+            f"""
+            SELECT
+                table_id,
+                sum(active_rows)::BIGINT,
+                sum(active_bytes)::BIGINT
+            FROM ({summaries}) AS summaries
+            GROUP BY table_id
+            ORDER BY table_id
             """
         ).fetchall()
 
@@ -534,9 +623,14 @@ def collect_inventory(
 
     lakes: list[LakeInventory] = []
     for metadata_schema in sorted(set(metadata_schemas)):
-        snapshot_id, snapshot_ms, scheduled_files, scheduled_ms = source.lake_summary(
-            metadata_schema
-        )
+        (
+            snapshot_id,
+            snapshot_ms,
+            scheduled_files,
+            scheduled_ms,
+            delete_older_than,
+            expire_older_than,
+        ) = source.lake_summary(metadata_schema)
         groups_by_table: dict[int, list[CompatibleFileGroup]] = {}
         for row in source.compatible_file_groups(metadata_schema):
             groups_by_table.setdefault(int(row[0]), []).append(
@@ -549,6 +643,10 @@ def collect_inventory(
                     merge_candidate_bytes=int(row[6]),
                 )
             )
+        inlined_by_table = {
+            int(row[0]): (int(row[1]), int(row[2]))
+            for row in source.inlined_data(metadata_schema)
+        }
         tables = tuple(
             TableInventory(
                 metadata_schema=metadata_schema,
@@ -580,6 +678,9 @@ def collect_inventory(
                 rewrite_delete_bytes=int(row[21]),
                 rewrite_deleted_rows=int(row[22]),
                 rewrite_original_rows=int(row[23]),
+                data_inlining_row_limit=int(row[25]),
+                inlined_data_rows=inlined_by_table.get(int(row[0]), (0, 0))[0],
+                inlined_data_bytes=inlined_by_table.get(int(row[0]), (0, 0))[1],
             )
             for row in source.tables(metadata_schema)
         )
@@ -593,9 +694,84 @@ def collect_inventory(
                 scheduled_files=int(scheduled_files),
                 oldest_scheduled_at=_utc_from_milliseconds(scheduled_ms),
                 tables=tables,
+                delete_older_than=(
+                    str(delete_older_than) if delete_older_than is not None else None
+                ),
+                expire_older_than=(
+                    str(expire_older_than) if expire_older_than is not None else None
+                ),
             )
         )
     return CatalogInventory(lakes=tuple(lakes))
+
+
+def _cleanup_eligible_files(
+    configuration: MetadataConfiguration,
+    metadata_schema: str,
+) -> int:
+    """Ask DuckLake to resolve its own persisted/default cleanup policy."""
+
+    connection = duckdb.connect(
+        database=":memory:",
+        config=connection_config({"threads": "1"}),
+    )
+    try:
+        connection.execute("PRAGMA disable_checkpoint_on_shutdown")
+        for extension in ("postgres", "ducklake"):
+            connection.execute(f"INSTALL {extension}")
+            connection.execute(f"LOAD {extension}")
+        uri = configuration.postgres_uri().replace("'", "''")
+        schema = metadata_schema.replace("'", "''")
+        connection.execute(
+            f"""
+            ATTACH 'ducklake:postgres:{uri}' AS {_CLEANUP_PROBE_ALIAS} (
+                METADATA_SCHEMA '{schema}',
+                CREATE_IF_NOT_EXISTS false,
+                READ_ONLY
+            )
+            """
+        )
+        row = connection.execute(
+            """
+            SELECT count(*)::BIGINT
+            FROM ducklake_cleanup_old_files(?, dry_run => true)
+            """,
+            [_CLEANUP_PROBE_ALIAS],
+        ).fetchone()
+        if row is None or len(row) != 1:
+            raise InventoryError(
+                f"DuckLake returned invalid cleanup diagnosis: {metadata_schema}"
+            )
+        return int(row[0])
+    except InventoryError:
+        raise
+    except duckdb.Error as error:
+        raise InventoryError(
+            f"could not diagnose scheduled-file cleanup: {metadata_schema}"
+        ) from error
+    finally:
+        connection.close()
+
+
+def _with_cleanup_eligibility(
+    configuration: MetadataConfiguration,
+    inventory: CatalogInventory,
+) -> CatalogInventory:
+    if not any(lake.scheduled_files for lake in inventory.lakes):
+        return inventory
+    lakes = tuple(
+        replace(
+            lake,
+            cleanup_eligible_files=_cleanup_eligible_files(
+                configuration,
+                lake.metadata_schema,
+            ),
+        )
+        if lake.scheduled_files
+        else lake
+        for lake in inventory.lakes
+    )
+    return CatalogInventory(lakes=lakes)
 
 
 def inventory_catalog(
@@ -609,7 +785,10 @@ def inventory_catalog(
             f"inventory attachment is not implemented for: {detection.backend}"
         )
 
-    connection = duckdb.connect(database=":memory:", config={"threads": "1"})
+    connection = duckdb.connect(
+        database=":memory:",
+        config=connection_config({"threads": "1"}),
+    )
     attached = False
     try:
         connection.execute("PRAGMA disable_checkpoint_on_shutdown")
@@ -620,7 +799,7 @@ def inventory_catalog(
             f"ATTACH '{uri}' AS {_INVENTORY_ALIAS} (TYPE postgres, READ_ONLY)"
         )
         attached = True
-        return collect_inventory(
+        inventory = collect_inventory(
             DuckDBInventorySource(connection, _INVENTORY_ALIAS),
             detection.metadata_schemas,
         )
@@ -632,3 +811,4 @@ def inventory_catalog(
         if attached:
             connection.execute(f"DETACH {_INVENTORY_ALIAS}")
         connection.close()
+    return _with_cleanup_eligibility(configuration, inventory)

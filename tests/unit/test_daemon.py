@@ -97,16 +97,21 @@ def table(table_id: int, *, files: int = 0, file_bytes: int = 0) -> TableInvento
     )
 
 
-def catalog(*tables: TableInventory) -> CatalogInventory:
+def catalog(
+    *tables: TableInventory,
+    scheduled_files: int = 0,
+    cleanup_eligible_files: int = 0,
+) -> CatalogInventory:
     return CatalogInventory(
         lakes=(
             LakeInventory(
                 metadata_schema="lake",
                 latest_snapshot_id=1,
                 latest_snapshot_at=None,
-                scheduled_files=0,
+                scheduled_files=scheduled_files,
                 oldest_scheduled_at=None,
                 tables=tables,
+                cleanup_eligible_files=cleanup_eligible_files,
             ),
         )
     )
@@ -305,6 +310,32 @@ def test_busy_lake_skips_other_tables_in_the_same_lake() -> None:
     assert executed == []
     assert coordinator.claims == []
     assert inventory.schemas == []
+
+
+def test_scheduled_cleanup_is_revalidated_and_executed_at_lake_scope() -> None:
+    initial = catalog(scheduled_files=7, cleanup_eligible_files=3)
+    after = catalog(scheduled_files=4, cleanup_eligible_files=0)
+    executed = []
+
+    outcome = maintain_once(
+        _METADATA,
+        _STORAGE,
+        _DETECTION,
+        _ENVELOPE,
+        prioritize(diagnose_inventory(initial)),
+        FakeCoordinator(),
+        inventory=InventorySequence(initial, after),
+        execute=lambda _metadata, _storage, _envelope, selection: (
+            executed.append(selection) or TreatmentResult(3, 0)
+        ),
+    )
+
+    assert outcome.state is MaintenanceState.COMPLETED
+    assert len(executed) == 1
+    assert executed[0].kind.value == "scheduled_file_cleanup"
+    assert executed[0].table_id is None
+    assert outcome.result == TreatmentResult(3, 0)
+    assert outcome.still_actionable is False
 
 
 def test_stale_treatment_is_not_executed() -> None:
@@ -526,3 +557,40 @@ def test_run_loop_replans_stale_work_immediately() -> None:
         ("cycle_completed", MaintenanceState.STALE),
         "stopped",
     ]
+
+
+def test_run_loop_treats_flushed_rows_as_progress() -> None:
+    stop_event = RecordingStopEvent()
+    observer = RecordingObserver()
+    configuration = RunConfiguration(7, 60, "127.0.0.1", 8_000)
+    cycles = 0
+
+    def cycle() -> MaintenanceOutcome:
+        nonlocal cycles
+        cycles += 1
+        if cycles == 1:
+            return MaintenanceOutcome(
+                state=MaintenanceState.COMPLETED,
+                selection=None,
+                result=TreatmentResult(
+                    files_processed=0,
+                    files_created=0,
+                    rows_processed=50,
+                ),
+                selection_reason=None,
+                claim_contention=0,
+                duration_seconds=1,
+                table_present=True,
+                still_actionable=False,
+            )
+        return no_treatment_outcome()
+
+    run_loop(
+        cycle,
+        configuration,
+        observer,
+        stop_event,  # type: ignore[arg-type]
+    )
+
+    assert cycles == 2
+    assert stop_event.waits == [7]

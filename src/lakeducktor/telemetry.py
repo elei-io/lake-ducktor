@@ -175,6 +175,12 @@ class WorkerTelemetry:
             ("kind",),
             registry=self.registry,
         )
+        self._rows_processed = Counter(
+            "lakeducktor_treatment_rows_processed_total",
+            "Rows processed by successful native treatments.",
+            ("kind",),
+            registry=self.registry,
+        )
         self._files_eliminated = Counter(
             "lakeducktor_treatment_files_eliminated_total",
             "Net files eliminated by successful native treatments.",
@@ -243,9 +249,24 @@ class WorkerTelemetry:
             "Active data files currently eligible for delete rewrite.",
             registry=self.registry,
         )
+        self._inlined_row_debt = Gauge(
+            "lakeducktor_inlined_data_rows",
+            "Active rows currently stored inline across maintained lakes.",
+            registry=self.registry,
+        )
+        self._inlined_byte_debt = Gauge(
+            "lakeducktor_inlined_data_bytes",
+            "Approximate serialized bytes currently stored inline.",
+            registry=self.registry,
+        )
         self._scheduled_files = Gauge(
             "lakeducktor_scheduled_files",
             "Files scheduled for deletion across maintained lakes.",
+            registry=self.registry,
+        )
+        self._cleanup_eligible_files = Gauge(
+            "lakeducktor_cleanup_eligible_files",
+            "Scheduled files currently eligible under native DuckLake policy.",
             registry=self.registry,
         )
         self._dangling_delete_files = Gauge(
@@ -260,6 +281,7 @@ class WorkerTelemetry:
             self._files_processed.labels(kind=kind.value)
             self._files_created.labels(kind=kind.value)
             self._files_eliminated.labels(kind=kind.value)
+            self._rows_processed.labels(kind=kind.value)
         self._set_health_metrics(self.health_snapshot())
 
     @property
@@ -295,7 +317,12 @@ class WorkerTelemetry:
             sum(candidate.expected_files_eliminated for candidate in plan.merges)
         )
         self._rewrite_file_debt.set(sum(table.rewrite_data_files for table in tables))
+        self._inlined_row_debt.set(sum(table.inlined_data_rows for table in tables))
+        self._inlined_byte_debt.set(sum(table.inlined_data_bytes for table in tables))
         self._scheduled_files.set(inventory.scheduled_files)
+        self._cleanup_eligible_files.set(
+            sum(getattr(lake, "cleanup_eligible_files", 0) for lake in inventory.lakes)
+        )
         self._dangling_delete_files.set(
             sum(lake.dangling_delete_files for lake in inventory.lakes)
         )
@@ -346,6 +373,9 @@ class WorkerTelemetry:
             )
             self._files_eliminated.labels(kind=selection.kind.value).inc(
                 max(0, result.files_processed - result.files_created)
+            )
+            self._rows_processed.labels(kind=selection.kind.value).inc(
+                result.rows_processed
             )
         with self._lock:
             self._phase = WorkerPhase.CYCLING

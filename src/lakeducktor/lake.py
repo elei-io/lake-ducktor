@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import duckdb
 
 from lakeducktor.config import MetadataConfiguration
+from lakeducktor.duckdb_config import connection_config
 from lakeducktor.model import BackendDetection, DuckDBExtension, MetadataBackend
 
 _PROBE_ALIAS = "lakeducktor_metadata_probe"
@@ -129,7 +130,10 @@ def detect_metadata_backend(
             f"unsupported metadata attachment hint: {configuration.backend_hint}"
         )
 
-    connection = duckdb.connect(database=":memory:", config={"threads": "1"})
+    connection = duckdb.connect(
+        database=":memory:",
+        config=connection_config({"threads": "1"}),
+    )
     try:
         connection.execute("PRAGMA disable_checkpoint_on_shutdown")
         connection.execute("INSTALL postgres")

@@ -139,7 +139,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "detected lake=%s snapshot=%s tables=%s "
                 "active_data_files=%s active_data_bytes=%s "
                 "active_delete_files=%s active_delete_bytes=%s "
-                "dangling_delete_files=%s scheduled_files=%s",
+                "inlined_data_rows=%s inlined_data_bytes=%s "
+                "dangling_delete_files=%s scheduled_files=%s "
+                "cleanup_eligible_files=%s delete_older_than=%s "
+                "expire_older_than=%s",
                 lake.metadata_schema,
                 lake.latest_snapshot_id
                 if lake.latest_snapshot_id is not None
@@ -149,8 +152,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 lake.active_data_bytes,
                 lake.active_delete_files,
                 lake.active_delete_bytes,
+                sum(table.inlined_data_rows for table in lake.tables),
+                sum(table.inlined_data_bytes for table in lake.tables),
                 lake.dangling_delete_files,
                 lake.scheduled_files,
+                getattr(lake, "cleanup_eligible_files", 0),
+                getattr(lake, "delete_older_than", None) or "native_default",
+                getattr(lake, "expire_older_than", None) or "unset",
             )
         if arguments.command in {"diagnose", "prioritize", "select", "maintain"}:
             try:
@@ -162,18 +170,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _LOGGER.info(
                     "diagnosis lake=%s state=%s actionable_tables=%s "
                     "excluded_tables=%s attention_tables=%s "
-                    "scheduled_files=%s",
+                    "scheduled_files=%s cleanup_eligible_files=%s "
+                    "delete_older_than=%s expire_older_than=%s",
                     lake.metadata_schema,
                     lake.state.value,
                     lake.actionable_tables,
                     lake.excluded_tables,
                     lake.attention_tables,
                     lake.scheduled_files,
+                    getattr(lake, "cleanup_eligible_files", 0),
+                    getattr(lake, "delete_older_than", None) or "native_default",
+                    getattr(lake, "expire_older_than", None) or "unset",
                 )
                 for table in lake.tables:
                     _LOGGER.info(
                         "diagnosis lake=%s table_id=%s schema=%r table=%r "
                         "state=%s reasons=%s sorting_enabled=%s merge_groups=%s "
+                        "data_inlining_row_limit=%s "
+                        "inline_flush_threshold_rows=%s "
+                        "inlined_data_rows=%s inlined_data_bytes=%s "
                         "merge_input_files=%s merge_input_bytes=%s "
                         "expected_files_eliminated=%s "
                         "recent_data_files_60s=%s rewrite_data_files=%s "
@@ -187,6 +202,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         ",".join(table.reasons),
                         str(table.sorting_enabled).lower(),
                         table.merge_groups,
+                        table.data_inlining_row_limit,
+                        table.inline_flush_threshold_rows,
+                        table.inlined_data_rows,
+                        table.inlined_data_bytes,
                         table.merge_input_files,
                         table.merge_input_bytes,
                         table.expected_files_eliminated,
@@ -204,6 +223,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _LOGGER.error("priority_failed error=%s", error)
                     return 1
                 if arguments.command == "prioritize":
+                    for candidate in plan.scheduled_file_cleanups:
+                        _LOGGER.info(
+                            "priority kind=scheduled_file_cleanup rank=%s "
+                            "lake=%s state=runnable eligible_files=%s "
+                            "scheduled_files=%s oldest_scheduled_at=%s "
+                            "retention_policy=%s",
+                            candidate.rank,
+                            candidate.metadata_schema,
+                            candidate.eligible_files,
+                            candidate.scheduled_files,
+                            candidate.oldest_scheduled_at.isoformat()
+                            if candidate.oldest_scheduled_at is not None
+                            else "none",
+                            candidate.delete_older_than or "native_default",
+                        )
+                    for candidate in plan.inline_flushes:
+                        _LOGGER.info(
+                            "priority kind=inline_flush rank=%s lake=%s "
+                            "table_id=%s schema=%r table=%r state=runnable "
+                            "sorting_enabled=%s inlined_rows=%s "
+                            "input_bytes=%s threshold_rows=%s "
+                            "data_inlining_row_limit=%s",
+                            candidate.rank,
+                            candidate.metadata_schema,
+                            candidate.table_id,
+                            candidate.schema_name,
+                            candidate.table_name,
+                            str(candidate.sorting_enabled).lower(),
+                            candidate.inlined_rows,
+                            candidate.input_bytes,
+                            candidate.threshold_rows,
+                            candidate.data_inlining_row_limit,
+                        )
                     for candidate in plan.delete_rewrites:
                         _LOGGER.info(
                             "priority kind=delete_rewrite rank=%s lake=%s "
@@ -255,8 +307,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                             candidate.adjusted_expected_files_eliminated,
                         )
                     _LOGGER.info(
-                        "priority_summary delete_rewrites=%s merges=%s "
+                        "priority_summary scheduled_file_cleanups=%s "
+                        "inline_flushes=%s "
+                        "delete_rewrites=%s merges=%s "
                         "runnable=%s blocked=%s excluded=%s attention=%s",
+                        len(plan.scheduled_file_cleanups),
+                        len(plan.inline_flushes),
                         len(plan.delete_rewrites),
                         len(plan.merges),
                         plan.runnable,
@@ -290,9 +346,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                             _LOGGER.info(
                                 "selected treatment=%s priority_rank=%s lake=%s "
                                 "table_id=%s schema=%r table=%r input_bytes=%s "
+                                "input_rows=%s "
                                 "admitted_bytes=%s sorting_enabled=%s "
                                 "memory_headroom_bytes=%s "
                                 "usable_memory_bytes=%s max_compacted_files=%s "
+                                "retention_policy=%s "
                                 "memory_deferred=%s",
                                 selected.kind.value,
                                 selected.priority_rank,
@@ -301,12 +359,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 selected.schema_name,
                                 selected.table_name,
                                 selected.input_bytes,
+                                selected.input_rows,
                                 selected.admitted_bytes,
                                 str(selected.sorting_enabled).lower(),
                                 selected.memory_headroom_bytes,
                                 selected.usable_memory_bytes,
                                 selected.max_compacted_files
                                 if selected.max_compacted_files is not None
+                                else "none",
+                                selected.retention_policy
+                                if selected.retention_policy is not None
                                 else "none",
                                 decision.memory_deferred,
                             )
@@ -357,6 +419,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             _LOGGER.info(
                                 "treatment_completed kind=%s lake=%s table_id=%s "
                                 "files_processed=%s files_created=%s "
+                                "rows_processed=%s "
                                 "duration_seconds=%.3f sorting_enabled=%s "
                                 "table_present=%s "
                                 "still_actionable=%s claim_contention=%s",
@@ -365,6 +428,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                 outcome.selection.table_id,
                                 outcome.result.files_processed,
                                 outcome.result.files_created,
+                                outcome.result.rows_processed,
                                 outcome.duration_seconds,
                                 str(outcome.selection.sorting_enabled).lower(),
                                 str(outcome.table_present).lower(),

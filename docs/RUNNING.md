@@ -12,6 +12,10 @@ native DuckLake operation. Useful work drains immediately. No work, contention,
 resource deferral, native no-progress, and failures wait
 `POLL_INTERVAL_SECONDS` before retrying.
 
+Scheduled-file eligibility is obtained from DuckLake's own read-only cleanup
+dry run. The worker does not override `delete_older_than`; a cleanup treatment
+uses the lake's persisted policy or the extension's native default.
+
 A pod performs one treatment at a time. Each treatment runs in an isolated
 child process and creates its own DuckDB connection. Connections are never
 shared with the parent loop, health server, watchdog, or another treatment.
@@ -21,6 +25,10 @@ exponential backoff bounded by `CONFLICT_BACKOFF_BASE_SECONDS` and
 `CONFLICT_BACKOFF_MAX_SECONDS`. After any failed native call, LakeDucktor
 re-inventories under the still-held claim and reports observed committed
 progress before deciding the next cycle.
+
+Each treatment connection also gives DuckLake up to 20 snapshot-commit
+attempts, beginning at a 100 ms wait with a 1.2× backoff. This absorbs short
+writer bursts before LakeDucktor's slower outer retry takes over.
 
 ## Health
 
@@ -52,3 +60,55 @@ readinessProbe:
 ```
 
 Operational settings are documented in [`.env.example`](../.env.example).
+
+## Local filesystem lakes
+
+For a filesystem-backed lake, expose its data directory to the LakeDucktor
+process and configure an absolute path:
+
+```sh
+CATALOG_STORAGE=filesystem
+CATALOG_DATA_PATH=/absolute/path/to/lake/
+```
+
+LakeDucktor attaches with that path as a connection-local DuckLake data-path
+override. This lets a producer use a different container path for the same
+bind-mounted directory while LakeDucktor runs on the host. The catalogue's
+schema, table, and active file paths must be relative to the DuckLake data
+root; absolute file registrations cannot be relocated this way.
+
+Build the LakeDucktor image and run a read-only inventory smoke test:
+
+```sh
+docker compose build
+docker compose run --rm lakeducktor inventory
+```
+
+The image currently includes a source-pinned DuckLake compatibility backport;
+see [DuckLake compatibility pin](DUCKLAKE_COMPATIBILITY.md).
+
+The Compose project is LakeDucktor and is not tied to a particular producer.
+Configure its metadata network and shared lake path in `.env`. For example, a
+local Atlas deployment that stores its state in `/Users/me/Code/atlas/.atlas`
+and uses the `atlas_default` network needs:
+
+```sh
+CONTAINER_METADATA_DATABASE_HOST=atlas-test-postgres
+CONTAINER_METADATA_DATABASE_PORT=5432
+CONTAINER_CATALOG_DATA_PATH=/app/.atlas/lake/
+LAKE_HOST_PATH=/Users/me/Code/atlas/.atlas
+LAKE_CONTAINER_PATH=/app/.atlas
+LAKEDUCKTOR_DOCKER_NETWORK=atlas_default
+```
+
+The producer and LakeDucktor must mount the same host data. Preserve the
+producer's container path when the catalogue contains absolute registered file
+paths. Do not mount the producer's private PostgreSQL data volume; LakeDucktor
+connects to PostgreSQL over the configured Docker network.
+
+The image and Compose service default to `lakeducktor run`. Use explicit
+one-shot commands for smoke tests, and start the worker with:
+
+```sh
+docker compose up lakeducktor
+```

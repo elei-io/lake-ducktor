@@ -1,0 +1,29 @@
+name: lakeducktor
+
+services:
+  lakeducktor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lakeducktor:local
+    init: true
+    user: "0:0"
+    env_file:
+      - .env
+    environment:
+      METADATA_DATABASE_HOST: ${CONTAINER_METADATA_DATABASE_HOST:-host.docker.internal}
+      METADATA_DATABASE_PORT: ${CONTAINER_METADATA_DATABASE_PORT:-5432}
+      CATALOG_DATA_PATH: ${CONTAINER_CATALOG_DATA_PATH:-/lake/}
+      METRICS_HOST: 0.0.0.0
+      METRICS_PORT: "8000"
+    volumes:
+      - ${LAKE_HOST_PATH}:${LAKE_CONTAINER_PATH:-/lake}
+    networks:
+      - metadata
+    ports:
+      - 127.0.0.1:${LAKEDUCKTOR_METRICS_PORT:-8001}:8000
+
+networks:
+  metadata:
+    external: true
+    name: ${LAKEDUCKTOR_DOCKER_NETWORK}

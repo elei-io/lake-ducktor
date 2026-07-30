@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 
@@ -86,6 +87,54 @@ def test_rewrite_blocks_only_the_same_tables_merge() -> None:
     assert plan.merges[1].blocked_by is TreatmentKind.DELETE_REWRITE
     assert plan.runnable == 2
     assert plan.blocked == 1
+
+
+def test_inline_flush_is_ranked_and_blocks_same_table_merge() -> None:
+    flush_and_merge = table_diagnosis(
+        1,
+        state=DiagnosisState.ACTIONABLE,
+        reasons=("inline_flush_pressure", "merge_pressure"),
+        inlined_data_rows=100,
+        inlined_data_bytes=10_000,
+        inline_flush_threshold_rows=50,
+        merge_groups=1,
+        merge_input_files=3,
+        merge_input_bytes=60,
+        expected_files_eliminated=2,
+    )
+
+    plan = prioritize(catalog(flush_and_merge))
+
+    assert [candidate.table_id for candidate in plan.inline_flushes] == [1]
+    assert plan.inline_flushes[0].data_inlining_row_limit == 10
+    assert plan.merges[0].state is PriorityState.BLOCKED
+    assert plan.merges[0].blocked_by is TreatmentKind.INLINE_FLUSH
+    assert plan.runnable == 1
+
+
+def test_scheduled_cleanup_is_ranked_at_lake_scope() -> None:
+    diagnosis = CatalogDiagnosis(
+        lakes=(
+            LakeDiagnosis(
+                metadata_schema="lake",
+                state=DiagnosisState.ACTIONABLE,
+                scheduled_files=10,
+                tables=(),
+                cleanup_eligible_files=7,
+                oldest_scheduled_at=datetime(2026, 7, 1, tzinfo=UTC),
+                delete_older_than="1 week",
+            ),
+        )
+    )
+
+    plan = prioritize(diagnosis)
+
+    assert len(plan.scheduled_file_cleanups) == 1
+    cleanup = plan.scheduled_file_cleanups[0]
+    assert cleanup.metadata_schema == "lake"
+    assert cleanup.eligible_files == 7
+    assert cleanup.delete_older_than == "1 week"
+    assert plan.runnable == 1
 
 
 def test_rewrites_rank_fraction_then_deleted_rows_then_cost() -> None:

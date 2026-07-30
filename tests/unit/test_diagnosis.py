@@ -50,6 +50,57 @@ def test_healthy_table_has_no_actionable_debt() -> None:
     assert diagnosis.reasons == ("healthy",)
 
 
+def test_inline_rows_flush_at_five_times_effective_write_limit() -> None:
+    below = diagnose_table(
+        table_inventory(
+            data_inlining_row_limit=10,
+            inlined_data_rows=49,
+            inlined_data_bytes=4_900,
+        )
+    )
+    ready = diagnose_table(
+        table_inventory(
+            data_inlining_row_limit=10,
+            inlined_data_rows=50,
+            inlined_data_bytes=5_000,
+        )
+    )
+
+    assert below.state is DiagnosisState.HEALTHY
+    assert below.inline_flush_threshold_rows == 50
+    assert ready.state is DiagnosisState.ACTIONABLE
+    assert ready.reasons == ("inline_flush_pressure",)
+
+
+def test_disabled_inlining_flushes_any_rows_left_from_the_old_policy() -> None:
+    diagnosis = diagnose_table(
+        table_inventory(
+            data_inlining_row_limit=0,
+            inlined_data_rows=1,
+            inlined_data_bytes=100,
+        )
+    )
+
+    assert diagnosis.inline_flush_threshold_rows == 1
+    assert diagnosis.state is DiagnosisState.ACTIONABLE
+
+
+def test_auto_compact_excludes_inline_flush() -> None:
+    diagnosis = diagnose_table(
+        table_inventory(
+            auto_compact=False,
+            inlined_data_rows=50,
+            inlined_data_bytes=5_000,
+        )
+    )
+
+    assert diagnosis.state is DiagnosisState.EXCLUDED
+    assert diagnosis.reasons == (
+        "inline_flush_pressure",
+        "auto_compact_disabled",
+    )
+
+
 def test_recent_file_activity_is_preserved_for_priority() -> None:
     diagnosis = diagnose_table(table_inventory(recent_data_files_60s=7))
 
@@ -167,6 +218,26 @@ def test_scheduled_cleanup_is_observed_at_lake_scope() -> None:
 
     assert diagnosis.lakes[0].state is DiagnosisState.ATTENTION
     assert diagnosis.lakes[0].scheduled_files == 3
+
+
+def test_native_eligible_scheduled_files_are_actionable_at_lake_scope() -> None:
+    lake = LakeInventory(
+        metadata_schema="lake",
+        latest_snapshot_id=1,
+        latest_snapshot_at=None,
+        scheduled_files=3,
+        oldest_scheduled_at=None,
+        tables=(table_inventory(),),
+        cleanup_eligible_files=2,
+        delete_older_than="1 week",
+    )
+
+    diagnosis = diagnose_inventory(CatalogInventory(lakes=(lake,)))
+
+    diagnosed = diagnosis.lakes[0]
+    assert diagnosed.state is DiagnosisState.ACTIONABLE
+    assert diagnosed.cleanup_eligible_files == 2
+    assert diagnosed.delete_older_than == "1 week"
 
 
 def test_invalid_native_setting_is_rejected() -> None:

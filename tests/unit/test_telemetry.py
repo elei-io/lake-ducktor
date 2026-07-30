@@ -189,17 +189,26 @@ def test_recent_insertion_files_are_exposed_as_an_aggregate_metric() -> None:
             state=SimpleNamespace(value="actionable"),
             recent_data_files_60s=3,
             rewrite_data_files=0,
+            inlined_data_rows=0,
+            inlined_data_bytes=0,
         ),
         SimpleNamespace(
             state=SimpleNamespace(value="healthy"),
             recent_data_files_60s=4,
             rewrite_data_files=0,
+            inlined_data_rows=0,
+            inlined_data_bytes=0,
         ),
     )
     worker.observe_plan(
         SimpleNamespace(
             scheduled_files=0,
-            lakes=(SimpleNamespace(dangling_delete_files=0),),
+            lakes=(
+                SimpleNamespace(
+                    dangling_delete_files=0,
+                    cleanup_eligible_files=3,
+                ),
+            ),
         ),
         SimpleNamespace(lakes=(SimpleNamespace(tables=tables),)),
         SimpleNamespace(
@@ -215,6 +224,7 @@ def test_recent_insertion_files_are_exposed_as_an_aggregate_metric() -> None:
     metrics = generate_latest(worker.registry).decode()
 
     assert 'lakeducktor_recent_data_files{window="60s"} 7.0' in metrics
+    assert "lakeducktor_cleanup_eligible_files 3.0" in metrics
 
 
 def test_http_health_endpoints_and_metrics_share_no_worker_connection() -> None:

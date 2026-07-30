@@ -139,15 +139,16 @@ class MetadataConfiguration:
 
 @dataclass(frozen=True, slots=True)
 class StorageConfiguration:
-    """Credentials required by a writable DuckLake attachment."""
+    """Storage access required by a writable DuckLake attachment."""
 
     provider: str
-    endpoint: str
-    region: str
-    access_key_id: str
-    secret_access_key: str
-    bucket: str
-    use_ssl: bool
+    data_path: str | None = None
+    endpoint: str = ""
+    region: str = ""
+    access_key_id: str = ""
+    secret_access_key: str = ""
+    bucket: str = ""
+    use_ssl: bool = False
 
     @classmethod
     def from_environment(
@@ -156,9 +157,19 @@ class StorageConfiguration:
     ) -> StorageConfiguration:
         values = os.environ if environment is None else environment
         provider = _required(values, "CATALOG_STORAGE").lower()
+        if provider == "filesystem":
+            data_path = Path(_required(values, "CATALOG_DATA_PATH")).expanduser()
+            if not data_path.is_absolute():
+                raise ConfigurationError(
+                    "CATALOG_DATA_PATH must be absolute for filesystem storage"
+                )
+            return cls(
+                provider=provider,
+                data_path=f"{str(data_path).rstrip('/')}/",
+            )
         if provider != "s3-compatible":
             raise ConfigurationError(
-                "the current executor supports CATALOG_STORAGE=s3-compatible"
+                "CATALOG_STORAGE must be filesystem or s3-compatible"
             )
         raw_endpoint = _required(values, "CATALOG_STORAGE_ENDPOINT")
         parsed = urlsplit(raw_endpoint)

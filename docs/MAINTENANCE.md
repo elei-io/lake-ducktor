@@ -7,7 +7,8 @@ plan.
 
 DuckBasin exercised file merging and delete-heavy file rewriting. It did not
 establish equivalent experience for snapshot expiration, obsolete-file
-cleanup, orphan removal, or flushing inlined data.
+cleanup, orphan removal, or flushing inlined data. LakeDucktor therefore keeps
+its inline-flush rule deliberately small and derived from DuckLake state.
 
 ## Ground truth and derived state
 
@@ -83,8 +84,28 @@ When the same table needs a delete rewrite and a merge, rewriting first avoids
 copying rows that are already logically dead and then rewriting the merged
 output again.
 
+When accumulated inlined rows need flushing, that flush blocks a merge of the
+same table. The resulting Parquet file can then participate in the next merge
+diagnosis rather than being left as immediate new merge debt.
+
 An oversized rewrite that cannot be admitted must remain visible, but it must
 not prevent independent, safe merge work from proceeding.
+
+### Flush accumulated inlined data proportionally
+
+DuckLake's effective `data_inlining_row_limit` controls whether one write is
+stored inline. LakeDucktor resolves that persisted option with table, schema,
+global, then native-default precedence and diagnoses flush pressure when:
+
+```text
+active inlined rows >= max(1, data_inlining_row_limit × 5)
+```
+
+The multiplier is LakeDucktor admission policy, not lake state. A zero limit
+therefore flushes any rows left from an earlier policy. `auto_compact=false`
+remains authoritative. Active inline rows and their approximate serialized
+bytes are rediscovered on every inventory; no flush watermark or task record
+is persisted by LakeDucktor.
 
 ### Drain to verified health
 
@@ -206,16 +227,19 @@ assuming a scoring heuristic provides it.
 ### Select one treatment
 
 Each worker has a fixed `DUCKDB_THREADS` and `DUCKDB_MEMORY` envelope and
-selects at most one treatment. Selection scans the ranked delete-rewrite lane,
-then the ranked runnable-merge lane; it does not manufacture a score that
-compares unlike treatments.
+selects at most one treatment. Selection scans native-policy scheduled-file
+cleanup, then the ranked delete-rewrite lane, the inline-flush lane, and the
+ranked runnable-merge lane. It does not manufacture a score that compares
+unlike treatments.
 
-A delete rewrite is admitted only when the complete active table footprint
-fits the memory envelope. A merge is admitted when at least one target-sized
-output fits. Its native `max_compacted_files` bound is derived from the number
-of target-sized outputs that fit, capped by the diagnosed output count.
-Oversized work remains reported as memory-deferred and does not block an
-independent treatment.
+Scheduled-file cleanup delegates eligibility to DuckLake and needs no DuckDB
+memory admission. A delete rewrite is admitted only when the complete active
+table footprint fits the memory envelope. An inline flush is admitted only
+when its current serialized inline input fits. A merge is admitted when at
+least one target-sized output fits. Its native `max_compacted_files` bound is
+derived from the number of target-sized outputs that fit, capped by the
+diagnosed output count. Oversized work remains reported as memory-deferred and
+does not block an independent treatment.
 
 Admission reads the table's current active sort configuration from
 `ducklake_sort_info`. This is refreshed after claiming because DuckLake applies
@@ -258,12 +282,46 @@ context with the configured memory and threads:
   estimated treatment at no more than 512 input files and within usable
   memory;
 - delete rewrites call DuckLake's table-scoped `rewrite_data_files` without
-  overriding the lake's effective threshold.
+  overriding the lake's effective threshold;
+- inline flushes call DuckLake's table-scoped `ducklake_flush_inlined_data` and
+  report the returned flushed-row count and the observed active-file increase
+  around the flush.
 
 DuckLake chooses the current eligible files and owns the metadata and object
 storage changes. LakeDucktor records the returned processed/created file
 counts, diagnoses the table once more, and releases the claim. A successful
 bounded treatment may remain actionable for the next invocation.
+
+### Clean up scheduled files
+
+Scheduled-file cleanup is a lake-scoped lifecycle, not a table treatment.
+Compaction and snapshot expiry deliberately schedule obsolete objects instead
+of deleting them immediately because existing readers may still need them.
+
+Inventory calls `ducklake_cleanup_old_files(..., dry_run => true)` through a
+read-only DuckLake attachment, without supplying `older_than`. DuckLake
+therefore resolves its persisted global `delete_older_than` option or its
+native default. The current pinned extension defaults to two days. The
+persisted `expire_older_than` option is also recorded for visibility, but it
+governs the separate snapshot-expiration lifecycle.
+
+When the dry run returns files, LakeDucktor creates one lake-scoped cleanup
+candidate. Treatment acquires the same lake-wide claim as other maintenance,
+repeats native dry-run diagnosis during revalidation, and calls:
+
+```sql
+CALL ducklake_cleanup_old_files('lakeducktor_treatment');
+```
+
+No explicit `older_than` and no `cleanup_all` are supplied. DuckLake owns
+policy resolution, object deletion, and schedule-row removal. LakeDucktor
+reports deleted files, current eligible files, and the stored policy source.
+Because the native function has no file-count bound, health and stuck-treatment
+signals remain important for unusually large or slow object-store cleanups.
+
+Orphan cleanup is a separate, more dangerous operation. Untracked objects are
+not equivalent to files DuckLake explicitly scheduled for deletion and must
+not share this treatment lane.
 
 Merge treatment is incremental. LakeDucktor never mutates the lake's persisted
 `target_file_size`; when the smallest eligible inputs would make one native
@@ -413,7 +471,7 @@ The remaining maintenance operations have additional safety questions:
 - obsolete-file cleanup must respect active readers and configured age;
 - orphan detection must distinguish genuinely untracked objects from recent or
   in-flight writes;
-- flushing inlined data may contend with writers and create new merge debt.
+- high-volume concurrent inline flushing still needs broader soak evidence.
 
 Those areas require their own evidence before conclusions from compaction are
 generalized to them.
