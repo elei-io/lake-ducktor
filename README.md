@@ -1,6 +1,6 @@
-# LakeDucktor
+# Lake Ducktor
 
-LakeDucktor keeps [DuckLake](https://ducklake.select/) healthy.
+Lake Ducktor keeps your [DuckLake](https://ducklake.select/) healthy.
 
 Point it at a lake and it continuously performs safe, bounded maintenance using
 the lake's own settings and native DuckLake operations. It keeps no
