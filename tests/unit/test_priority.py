@@ -166,6 +166,7 @@ def test_active_writer_waits_for_a_useful_merge_batch() -> None:
     assert plan.merges[0].state is PriorityState.WAITING
     assert plan.merges[0].waiting_reason == "active_writer_batching"
     assert plan.merges[0].input_groups == ()
+    assert plan.merges[0].ready_groups == 0
     assert plan.runnable == 0
     assert plan.waiting == 1
 
@@ -199,6 +200,7 @@ def test_active_writer_runs_when_group_reaches_a_useful_batch(
     assert merge.state is PriorityState.RUNNABLE
     assert merge.waiting_reason is None
     assert merge.input_groups == (group,)
+    assert merge.ready_groups == 1
 
 
 def test_quiet_writer_drains_a_small_merge_tail() -> None:
@@ -219,9 +221,10 @@ def test_quiet_writer_drains_a_small_merge_tail() -> None:
 
     assert merge.state is PriorityState.RUNNABLE
     assert merge.input_groups == (group,)
+    assert merge.ready_groups == 1
 
 
-def test_active_writer_admits_only_ready_compatible_groups() -> None:
+def test_active_writer_trigger_admits_all_productive_compatible_groups() -> None:
     waiting = CompatibleFileGroup(1, 7, 3, 3, 3, 3)
     ready = CompatibleFileGroup(1, 8, 32, 32, 32, 32)
     candidate = table_diagnosis(
@@ -239,7 +242,8 @@ def test_active_writer_admits_only_ready_compatible_groups() -> None:
     merge = prioritize(catalog(candidate)).merges[0]
 
     assert merge.state is PriorityState.RUNNABLE
-    assert merge.input_groups == (ready,)
+    assert merge.ready_groups == 1
+    assert merge.input_groups == (waiting, ready)
 
 
 def test_scheduled_cleanup_is_ranked_at_lake_scope() -> None:

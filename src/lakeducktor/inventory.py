@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -30,6 +31,8 @@ _CLEANUP_PROBE_ALIAS = "lakeducktor_cleanup_probe"
 _EXPIRATION_PROBE_ALIAS = "lakeducktor_expiration_probe"
 _ORPHAN_PROBE_ALIAS = "lakeducktor_orphan_probe"
 _PROBE_STORAGE_SECRET = "lakeducktor_probe_storage"
+
+_LOGGER = logging.getLogger("lakeducktor")
 
 type LakeSummaryRow = tuple[
     int | None,
@@ -728,11 +731,7 @@ def _native_dry_run_count(
     )
     try:
         connection.execute("PRAGMA disable_checkpoint_on_shutdown")
-        extensions = (
-            ("httpfs", "postgres", "ducklake")
-            if storage is not None and storage.provider == "s3-compatible"
-            else ("postgres", "ducklake")
-        )
+        extensions = ("httpfs", "postgres", "ducklake")
         for extension in extensions:
             connection.execute(f"INSTALL {extension}")
             connection.execute(f"LOAD {extension}")
@@ -768,9 +767,7 @@ def _native_dry_run_count(
             if storage.data_path is None:
                 raise InventoryError("filesystem storage is missing its data path")
             data_path = storage.data_path.replace("'", "''")
-            options.extend(
-                (f"DATA_PATH '{data_path}'", "OVERRIDE_DATA_PATH true")
-            )
+            options.extend((f"DATA_PATH '{data_path}'", "OVERRIDE_DATA_PATH true"))
         connection.execute(
             f"""
             ATTACH 'ducklake:postgres:{uri}' AS {alias} (
@@ -978,6 +975,7 @@ class MaintenanceInventory:
     storage: StorageConfiguration
     orphan_scan_interval_seconds: float | None = None
     clock: Callable[[], float] = monotonic
+    orphan_probe_observer: Callable[[bool], None] | None = None
     _orphan_files_by_lake: dict[str, int] = field(default_factory=dict)
     _orphan_scanned_at: dict[str, float] = field(default_factory=dict)
 
@@ -1001,13 +999,31 @@ class MaintenanceInventory:
             configuration,
             detection,
             self.storage,
-            orphan_probe_schemas=due,
+            orphan_probe_schemas=frozenset(),
         )
+        probe_failed = False
         lakes: list[LakeInventory] = []
         for lake in inventory.lakes:
             if lake.metadata_schema in due:
-                self._orphan_files_by_lake[lake.metadata_schema] = lake.orphan_files
                 self._orphan_scanned_at[lake.metadata_schema] = now
+                try:
+                    orphan_files = _orphan_files(
+                        configuration,
+                        self.storage,
+                        lake.metadata_schema,
+                    )
+                except InventoryError as error:
+                    probe_failed = True
+                    self._orphan_files_by_lake[lake.metadata_schema] = 0
+                    cause = error.__cause__ or error
+                    _LOGGER.warning(
+                        "orphan_probe_failed lake=%s error=%s "
+                        "continuing_without_orphan_cleanup=true",
+                        lake.metadata_schema,
+                        cause,
+                    )
+                else:
+                    self._orphan_files_by_lake[lake.metadata_schema] = orphan_files
             lakes.append(
                 replace(
                     lake,
@@ -1017,6 +1033,8 @@ class MaintenanceInventory:
                     ),
                 )
             )
+        if due and self.orphan_probe_observer is not None:
+            self.orphan_probe_observer(not probe_failed)
         return CatalogInventory(lakes=tuple(lakes))
 
     def treatment_completed(

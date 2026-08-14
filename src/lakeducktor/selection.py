@@ -25,6 +25,7 @@ class SelectionError(RuntimeError):
 
 _MINIMUM_BYTES_PER_THREAD = 125_000_000
 _MAXIMUM_MERGE_INPUT_FILES = 512
+_SORTED_MERGE_INPUT_MEMORY_MULTIPLIER = 8
 _UNSORTED_HEADROOM_DIVISOR = 4
 _SORTED_HEADROOM_DIVISOR = 2
 
@@ -210,6 +211,52 @@ def _merge_selection(
             candidate.target_file_size_bytes,
             usable_memory,
         )
+        if candidate.sorting_enabled:
+            productive_groups = tuple(
+                group
+                for group in candidate.input_groups
+                if group.merge_candidate_files >= 2
+                and group.merge_candidate_bytes > 0
+            )
+            if not productive_groups:
+                raise SelectionError(
+                    "sorted merge has no productive compatible group for "
+                    f"table_id={candidate.table_id}"
+                )
+            largest_group_bytes = max(
+                group.merge_candidate_bytes for group in productive_groups
+            )
+            largest_group_files = max(
+                group.merge_candidate_files for group in productive_groups
+            )
+            input_memory_limit = (
+                usable_memory // _SORTED_MERGE_INPUT_MEMORY_MULTIPLIER
+            )
+            if (
+                input_memory_limit <= 0
+                or largest_group_bytes > input_memory_limit
+                or largest_group_bytes > execution_target
+                or largest_group_files > _MAXIMUM_MERGE_INPUT_FILES
+            ):
+                return None
+            return TreatmentSelection(
+                kind=TreatmentKind.MERGE,
+                priority_rank=candidate.rank,
+                metadata_schema=candidate.metadata_schema,
+                table_id=candidate.table_id,
+                schema_name=candidate.schema_name,
+                table_name=candidate.table_name,
+                input_bytes=candidate.input_bytes,
+                admitted_bytes=largest_group_bytes,
+                sorting_enabled=True,
+                memory_headroom_bytes=headroom,
+                usable_memory_bytes=usable_memory,
+                max_compacted_files=1,
+                input_files=candidate.input_files,
+                lake_target_file_size_bytes=candidate.target_file_size_bytes,
+                execution_target_file_size_bytes=execution_target,
+                admitted_input_files=largest_group_files,
+            )
         admitted_files = 0
         admitted_bytes = 0
         admitted_outputs = 0
@@ -254,6 +301,8 @@ def _merge_selection(
                 execution_target_file_size_bytes=execution_target,
                 admitted_input_files=admitted_files,
             )
+    if candidate.sorting_enabled:
+        return None
     expected_output_files = candidate.input_files - candidate.expected_files_eliminated
     if expected_output_files <= 0:
         raise SelectionError(

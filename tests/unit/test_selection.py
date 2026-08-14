@@ -259,6 +259,53 @@ def test_merge_admits_whole_compatible_groups_by_actual_inputs() -> None:
     assert selected.execution_target_file_size_bytes == 100
 
 
+def test_sorted_merge_admits_one_small_compatible_group() -> None:
+    groups = (
+        CompatibleFileGroup(1, 1, 16, 15_000_000, 16, 15_000_000),
+        CompatibleFileGroup(1, 2, 8, 9_000_000, 8, 9_000_000),
+    )
+    candidate = replace(
+        merge(1, 1, target=128_000_000, input_groups=groups),
+        sorting_enabled=True,
+        groups=2,
+        input_files=24,
+        input_bytes=24_000_000,
+        expected_files_eliminated=22,
+    )
+
+    selected = select_treatment(
+        plan(merges=(candidate,)),
+        ResourceEnvelope(4, "4GB", 4_000_000_000),
+    ).selected
+
+    assert selected is not None
+    assert selected.max_compacted_files == 1
+    assert selected.admitted_input_files == 16
+    assert selected.admitted_bytes == 15_000_000
+
+
+def test_sorted_merge_is_deferred_when_one_group_exceeds_memory_allowance() -> None:
+    groups = (
+        CompatibleFileGroup(1, 1, 2, 251_000_000, 2, 251_000_000),
+    )
+    candidate = replace(
+        merge(1, 1, target=512_000_000, input_groups=groups),
+        sorting_enabled=True,
+        input_files=2,
+        input_bytes=251_000_000,
+        expected_files_eliminated=1,
+    )
+
+    decision = select_treatment(
+        plan(merges=(candidate,)),
+        ResourceEnvelope(4, "4GB", 4_000_000_000),
+    )
+
+    assert decision.selected is None
+    assert decision.reason is SelectionReason.NO_TREATMENT_FITS_MEMORY
+    assert decision.memory_deferred == 1
+
+
 def test_merge_group_admission_stops_at_usable_memory() -> None:
     groups = (
         CompatibleFileGroup(1, 1, 2, 100, 2, 100),
@@ -416,7 +463,7 @@ def test_thread_minimum_can_consume_the_available_treatment_budget() -> None:
     assert treatment_memory_budget(envelope, False) == (1_000_000_000, 0)
 
 
-def test_current_sorting_state_reduces_native_merge_batch() -> None:
+def test_sorted_merge_without_compatible_groups_is_not_admitted() -> None:
     envelope = ResourceEnvelope(4, "4GB", 4_000_000_000)
     unsorted = replace(
         merge(1, 1, target=2_500_000_000, minimum=10_000_000),
@@ -435,8 +482,6 @@ def test_current_sorting_state_reduces_native_merge_batch() -> None:
     ).selected
 
     assert unsorted_selection is not None
-    assert sorted_selection is not None
+    assert sorted_selection is None
     assert unsorted_selection.max_compacted_files == 1
-    assert sorted_selection.max_compacted_files == 1
     assert unsorted_selection.admitted_bytes == 2_500_000_000
-    assert sorted_selection.admitted_bytes == 2_000_000_000

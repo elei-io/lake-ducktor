@@ -128,6 +128,105 @@ def test_cycle_failure_remains_unready_during_backoff() -> None:
     assert health.reason == "cycle_failed"
 
 
+def test_cycle_failure_remains_unready_during_the_next_attempt() -> None:
+    clock = FakeClock()
+    worker = telemetry(clock)
+    worker.cycle_failed()
+    worker.idle(10)
+    worker.cycle_started()
+
+    health = worker.health_snapshot()
+    metrics = generate_latest(worker.registry).decode()
+
+    assert health.ready is False
+    assert health.phase is WorkerPhase.CYCLING
+    assert health.reason == "cycle_failed"
+    assert "lakeducktor_consecutive_cycle_failures 1.0" in metrics
+    assert "lakeducktor_cycle_last_completed_timestamp_seconds 0.0" in metrics
+
+
+def test_successful_cycle_clears_previous_failure_readiness() -> None:
+    worker = telemetry(FakeClock())
+    worker.cycle_failed()
+    worker.cycle_started()
+    worker.cycle_completed(
+        MaintenanceOutcome(
+            state=MaintenanceState.NO_TREATMENT,
+            selection=None,
+            result=None,
+            selection_reason=None,
+            claim_contention=0,
+            duration_seconds=None,
+            table_present=None,
+            still_actionable=None,
+        )
+    )
+
+    health = worker.health_snapshot()
+    metrics = generate_latest(worker.registry).decode()
+
+    assert health.ready is True
+    assert health.reason == "ready"
+    assert "lakeducktor_consecutive_cycle_failures 0.0" in metrics
+    assert "lakeducktor_cycle_last_completed_timestamp_seconds 1000.0" in metrics
+
+
+def test_inventory_cycle_timeout_is_bounded_below_treatment_timeout() -> None:
+    clock = FakeClock()
+    worker = WorkerTelemetry(
+        poll_interval_seconds=5,
+        treatment_stuck_after_seconds=3_600,
+        clock=clock,
+    )
+    worker.cycle_started()
+    clock.advance(61)
+
+    health = worker.watchdog_tick()
+
+    assert health.ready is False
+    assert health.reason == "cycle_stuck"
+
+
+def test_orphan_probe_failure_is_counted_without_blocking_readiness() -> None:
+    worker = telemetry(FakeClock())
+    worker.cycle_started()
+    worker.orphan_probe_completed(False)
+
+    health = worker.health_snapshot()
+    metrics = generate_latest(worker.registry).decode()
+
+    assert health.ready is True
+    assert "lakeducktor_orphan_probe_failures_total 1.0" in metrics
+
+
+def test_failure_blocked_treatment_keeps_worker_unready() -> None:
+    worker = telemetry(FakeClock())
+    worker.treatment_blocked(
+        selection(),
+        ExecutionFailureReason.RESOURCE_EXHAUSTED,
+    )
+    worker.cycle_completed(
+        MaintenanceOutcome(
+            state=MaintenanceState.NO_TREATMENT,
+            selection=None,
+            result=None,
+            selection_reason=None,
+            claim_contention=0,
+            duration_seconds=None,
+            table_present=None,
+            still_actionable=None,
+        )
+    )
+
+    health = worker.health_snapshot()
+    metrics = generate_latest(worker.registry).decode()
+
+    assert health.live is True
+    assert health.ready is False
+    assert health.reason == "treatment_blocked"
+    assert "lakeducktor_failure_blocked_treatments 1.0" in metrics
+
+
 def test_treatment_progress_and_claim_contention_are_counted() -> None:
     clock = FakeClock()
     worker = telemetry(clock)
@@ -199,8 +298,7 @@ def test_observed_merge_input_bound_mismatch_is_counted() -> None:
     metrics = generate_latest(worker.registry).decode()
 
     assert (
-        'lakeducktor_treatment_input_bound_exceeded_total{kind="merge"} 1.0'
-        in metrics
+        'lakeducktor_treatment_input_bound_exceeded_total{kind="merge"} 1.0' in metrics
     )
 
 

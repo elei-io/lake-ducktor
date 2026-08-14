@@ -318,7 +318,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "schema=%r table=%r state=%s blocked_by=%s "
                             "waiting_reason=%s "
                             "sorting_enabled=%s "
-                            "groups=%s ready_groups=%s "
+                            "groups=%s ready_groups=%s admission_groups=%s "
                             "input_files=%s input_bytes=%s "
                             "average_input_file_bytes=%s "
                             "expected_files_eliminated=%s "
@@ -336,6 +336,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             candidate.waiting_reason or "none",
                             str(candidate.sorting_enabled).lower(),
                             candidate.groups,
+                            candidate.ready_groups,
                             len(candidate.input_groups),
                             candidate.input_files,
                             candidate.input_bytes,

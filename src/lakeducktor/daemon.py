@@ -94,10 +94,12 @@ class MaintenanceError(RuntimeError):
         *,
         reason: ExecutionFailureReason | None = None,
         selection: TreatmentSelection | None = None,
+        committed_progress: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.reason = reason
         self.selection = selection
+        self.committed_progress = committed_progress
 
     @property
     def transient(self) -> bool:
@@ -157,6 +159,12 @@ class RunLoopObserver(MaintenanceObserver, Protocol):
         self,
         reason: ExecutionFailureReason,
         duration_seconds: float,
+    ) -> None: ...
+
+    def treatment_blocked(
+        self,
+        selection: TreatmentSelection,
+        reason: ExecutionFailureReason,
     ) -> None: ...
 
 
@@ -281,13 +289,15 @@ def maintain_once(
     inventory: InventoryFunction = inventory_catalog,
     execute: ExecutionFunction = execute_treatment,
     observer: MaintenanceObserver | None = None,
+    unavailable_tables: frozenset[tuple[str, int | None]] = frozenset(),
 ) -> MaintenanceOutcome:
     """Claim, revalidate, and execute at most one treatment."""
 
     if inventory is inventory_catalog:
         inventory = MaintenanceInventory(storage)
-    unavailable: set[tuple[str, int | None]] = set()
+    unavailable = set(unavailable_tables)
     claim_contention = 0
+    failure_committed_progress: bool | None = None
     try:
         while True:
             decision = select_treatment(
@@ -431,6 +441,14 @@ def maintain_once(
                             selection.metadata_schema,
                         )
                         if files_after is not None:
+                            failure_committed_progress = (
+                                files_after < selection.input_files
+                                or (
+                                    snapshot_before is not None
+                                    and snapshot_after is not None
+                                    and snapshot_after > snapshot_before
+                                )
+                            )
                             if observer is not None:
                                 observer.treatment_progress_observed(
                                     selection,
@@ -559,6 +577,7 @@ def maintain_once(
             str(error),
             reason=error.reason,
             selection=selection,
+            committed_progress=failure_committed_progress,
         ) from error
     except (
         CoordinationError,
@@ -580,6 +599,7 @@ def maintenance_cycle(
     inventory: InventoryFunction = inventory_catalog,
     coordinator_factory: CoordinatorFactory = PostgresTreatmentCoordinator,
     execute: ExecutionFunction = execute_treatment,
+    unavailable_tables: frozenset[tuple[str, int | None]] = frozenset(),
 ) -> MaintenanceOutcome:
     """Discover all state afresh and perform at most one treatment."""
 
@@ -595,7 +615,7 @@ def maintenance_cycle(
         current_inventory = inventory(configuration, detection)
         diagnosis = diagnose_inventory(current_inventory)
         plan = prioritize(diagnosis)
-        decision = select_treatment(plan, envelope)
+        decision = select_treatment(plan, envelope, unavailable_tables)
         if observer is not None:
             observer.observe_plan(
                 current_inventory,
@@ -630,6 +650,7 @@ def maintenance_cycle(
             inventory=inventory,
             execute=execute,
             observer=observer,
+            unavailable_tables=unavailable_tables,
         )
     except MaintenanceError:
         raise
@@ -651,10 +672,12 @@ def run_loop(
     configuration: RunConfiguration,
     observer: RunLoopObserver,
     stop_event: Event,
+    blocked_tables: set[tuple[str, int | None]] | None = None,
 ) -> None:
     """Drain useful work immediately and wait interruptibly when idle."""
 
     consecutive_conflicts = 0
+    failure_blocked_tables = blocked_tables if blocked_tables is not None else set()
     try:
         while not stop_event.is_set():
             observer.cycle_started()
@@ -665,6 +688,27 @@ def run_loop(
             except MaintenanceError as error:
                 observer.cycle_failed()
                 should_wait = True
+                selection = error.selection
+                if (
+                    error.reason is not None
+                    and not error.transient
+                    and error.reason is not ExecutionFailureReason.INTERRUPTED
+                    and error.committed_progress is False
+                    and selection is not None
+                    and selection.table_id is not None
+                ):
+                    key = (selection.metadata_schema, selection.table_id)
+                    if key not in failure_blocked_tables:
+                        failure_blocked_tables.add(key)
+                        observer.treatment_blocked(selection, error.reason)
+                        _LOGGER.error(
+                            "treatment_blocked kind=%s lake=%s table_id=%s "
+                            "reason=%s committed_progress=false",
+                            selection.kind.value,
+                            selection.metadata_schema,
+                            selection.table_id,
+                            error.reason.value,
+                        )
                 if error.transient and error.reason is not None:
                     consecutive_conflicts += 1
                     wait_seconds = min(
@@ -771,9 +815,11 @@ def run_service(
         raise RunError(str(error)) from error
     stop_event = Event()
     execute_isolated = IsolatedTreatmentExecutor(stop_event)
+    blocked_tables: set[tuple[str, int | None]] = set()
     maintenance_inventory = MaintenanceInventory(
         storage,
         orphan_scan_interval_seconds=configuration.orphan_scan_interval_seconds,
+        orphan_probe_observer=telemetry.orphan_probe_completed,
     )
     restore_signals = _install_signal_handlers(stop_event, telemetry)
     try:
@@ -797,10 +843,12 @@ def run_service(
                 observer=telemetry,
                 inventory=maintenance_inventory,
                 execute=execute_isolated,
+                unavailable_tables=frozenset(blocked_tables),
             ),
             configuration,
             telemetry,
             stop_event,
+            blocked_tables,
         )
     finally:
         restore_signals()

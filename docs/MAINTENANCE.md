@@ -141,6 +141,10 @@ after one productive pass.
   wake/reset race.
 - Failed work remains discoverable and receives a retry delay so a persistent
   fault cannot create a tight loop.
+- A non-transient treatment failure with verified zero catalogue progress
+  blocks that table for the worker's lifetime. It is not retried, and worker
+  readiness remains false until the process is deliberately restarted after
+  correction.
 - Coordination records need storage-level defaults because not every writer
   necessarily passes through the same application model.
 
@@ -215,6 +219,18 @@ previous minute, a compatible group becomes ready only after it reaches 32
 candidate files or one target file's worth of candidate bytes. Smaller active
 groups remain visible as `active_writer_batching` rather than repeatedly
 rewriting the previous merge output for every arriving file.
+
+DuckLake's merge operation is table-scoped and chooses the compatible groups
+it processes. A ready group therefore opens the table-level gate; the bounded
+treatment budget then includes all productive compatible groups. Restricting
+the budget to the triggering groups would not restrict DuckLake's choice and
+could turn one useful batch into many small catalogue commits.
+
+Sorted tables are deliberately narrower. A native call may create only one
+compacted output, and every compatible group must fit an eight-times compressed
+input memory allowance. This avoids running many independent sorts inside one
+opaque native call. If even one group cannot be admitted safely, the merge is
+left visible as memory-deferred work.
 
 Delete rewrites have a different benefit model: live input bytes describe
 cost, while eligible delete files, deleted rows, and deleted fraction describe
@@ -476,6 +492,12 @@ examined.
 Signals can limit inspections to touched tables, but periodic reconciliation is
 still needed for correctness. The two paths should share the same diagnosis
 semantics.
+
+Storage-aware orphan discovery is auxiliary housekeeping, not a prerequisite
+for compaction. Files can legitimately appear or disappear while a native
+orphan walk is running. A failed walk must therefore be recorded, throttled,
+and retried later without aborting inventory, inline flushing, rewriting, or
+merging. Stale orphan counts must not authorize deletion after a failed walk.
 
 ### Measure convergence, not activity
 

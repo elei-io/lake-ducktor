@@ -296,6 +296,7 @@ class MergePriority:
     minimum_input_file_bytes: int = 0
     input_groups: tuple[CompatibleFileGroup, ...] = ()
     waiting_reason: str | None = None
+    ready_groups: int = 0
 
 
 @dataclass(frozen=True, slots=True)

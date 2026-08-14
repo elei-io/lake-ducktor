@@ -312,15 +312,16 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
                 sorting_enabled=table.sorting_enabled,
                 minimum_input_file_bytes=(table.minimum_merge_candidate_file_bytes),
                 input_groups=(
-                    ready_groups
-                    if table.recent_data_files_60s > 0
-                    else table.merge_candidate_groups
+                    table.merge_candidate_groups
+                    if ready
+                    else ()
                 ),
                 waiting_reason=(
                     "active_writer_batching"
                     if not blocked and not ready
                     else None
                 ),
+                ready_groups=len(ready_groups),
             )
         )
     merges = tuple(merge_priorities)

@@ -6,6 +6,7 @@ from lakeducktor.inventory import (
     CompatibleFileGroupRow,
     DuckDBInventorySource,
     InlinedDataRow,
+    InventoryError,
     LakeSummaryRow,
     MaintenanceInventory,
     TableInventoryRow,
@@ -254,6 +255,8 @@ def test_cleanup_probe_delegates_policy_to_native_dry_run() -> None:
         connection,
         connection,
         connection,
+        connection,
+        connection,
         result,
     ]
     configuration = MetadataConfiguration(
@@ -284,6 +287,8 @@ def test_expiration_probe_delegates_policy_to_native_dry_run() -> None:
     result = Mock()
     result.fetchone.return_value = (4,)
     connection.execute.side_effect = [
+        connection,
+        connection,
         connection,
         connection,
         connection,
@@ -326,6 +331,8 @@ def test_orphan_probe_uses_storage_and_never_overrides_native_retention() -> Non
         connection,
         connection,
         connection,
+        connection,
+        connection,
         result,
     ]
     configuration = MetadataConfiguration(
@@ -358,7 +365,7 @@ def test_orphan_probe_uses_storage_and_never_overrides_native_retention() -> Non
     assert not any("DETACH" in query for query in queries)
 
 
-def test_maintenance_inventory_caches_orphan_scan_until_interval_or_cleanup() -> None:
+def test_maintenance_inventory_isolates_and_throttles_orphan_probe_failure() -> None:
     storage = StorageConfiguration(provider="filesystem", data_path="/lakes/")
     detection = BackendDetection(
         backend=MetadataBackend.POSTGRES,
@@ -367,7 +374,7 @@ def test_maintenance_inventory_caches_orphan_scan_until_interval_or_cleanup() ->
         duckdb_extensions=(),
     )
     now = [100.0]
-    probes: list[frozenset[str] | None] = []
+    probe_outcomes: list[bool] = []
 
     def collect(
         _configuration,
@@ -376,7 +383,7 @@ def test_maintenance_inventory_caches_orphan_scan_until_interval_or_cleanup() ->
         *,
         orphan_probe_schemas,
     ) -> CatalogInventory:
-        probes.append(orphan_probe_schemas)
+        assert orphan_probe_schemas == frozenset()
         return CatalogInventory(
             lakes=(
                 LakeInventory(
@@ -386,7 +393,7 @@ def test_maintenance_inventory_caches_orphan_scan_until_interval_or_cleanup() ->
                     scheduled_files=0,
                     oldest_scheduled_at=None,
                     tables=(),
-                    orphan_files=5 if "lake" in orphan_probe_schemas else 0,
+                    orphan_files=0,
                 ),
             )
         )
@@ -395,11 +402,24 @@ def test_maintenance_inventory_caches_orphan_scan_until_interval_or_cleanup() ->
         storage,
         orphan_scan_interval_seconds=3_600,
         clock=lambda: now[0],
+        orphan_probe_observer=probe_outcomes.append,
     )
     configuration = Mock()
-    with patch("lakeducktor.inventory.inventory_catalog", side_effect=collect):
+    with (
+        patch("lakeducktor.inventory.inventory_catalog", side_effect=collect),
+        patch(
+            "lakeducktor.inventory._orphan_files",
+            side_effect=(InventoryError("staging file disappeared"), 5),
+        ) as orphan_probe,
+    ):
+        assert collector(configuration, detection).lakes[0].orphan_files == 0
+        assert collector(configuration, detection).lakes[0].orphan_files == 0
+        assert orphan_probe.call_count == 1
+
+        now[0] += 3_600
         assert collector(configuration, detection).lakes[0].orphan_files == 5
-        assert collector(configuration, detection).lakes[0].orphan_files == 5
+        assert orphan_probe.call_count == 2
+
         collector.treatment_completed(
             TreatmentSelection(
                 kind=TreatmentKind.ORPHAN_FILE_CLEANUP,
@@ -418,12 +438,5 @@ def test_maintenance_inventory_caches_orphan_scan_until_interval_or_cleanup() ->
             TreatmentResult(5, 0),
         )
         assert collector(configuration, detection).lakes[0].orphan_files == 0
-        now[0] += 3_600
-        assert collector(configuration, detection).lakes[0].orphan_files == 5
 
-    assert probes == [
-        frozenset({"lake"}),
-        frozenset(),
-        frozenset(),
-        frozenset({"lake"}),
-    ]
+    assert probe_outcomes == [False, True]

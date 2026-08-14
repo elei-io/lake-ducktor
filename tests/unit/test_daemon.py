@@ -20,7 +20,9 @@ from lakeducktor.model import (
     ResourceEnvelope,
     SelectionReason,
     TableInventory,
+    TreatmentKind,
     TreatmentResult,
+    TreatmentSelection,
 )
 from lakeducktor.priority import prioritize
 
@@ -225,6 +227,13 @@ class RecordingObserver:
     ) -> None:
         self.events.append(("retry_scheduled", reason, duration_seconds))
 
+    def treatment_blocked(
+        self,
+        selection,
+        reason: ExecutionFailureReason,
+    ) -> None:
+        self.events.append(("treatment_blocked", selection.table_id, reason))
+
 
 class RecordingStopEvent:
     def __init__(self) -> None:
@@ -408,6 +417,7 @@ def test_failed_treatment_reports_post_failure_progress() -> None:
         )
 
     assert error.value.reason is ExecutionFailureReason.CONCURRENT_COMPACTION
+    assert error.value.committed_progress is True
     assert (
         "treatment_progress_observed",
         1,
@@ -416,6 +426,31 @@ def test_failed_treatment_reports_post_failure_progress() -> None:
         1,
         1,
     ) in observer.events
+
+
+def test_failed_treatment_reports_verified_zero_progress() -> None:
+    initial = catalog(table(1, files=4, file_bytes=80))
+
+    def fail(*_arguments) -> TreatmentResult:
+        raise ExecutionError(
+            "native OOM",
+            reason=ExecutionFailureReason.RESOURCE_EXHAUSTED,
+        )
+
+    with pytest.raises(MaintenanceError) as error:
+        maintain_once(
+            _METADATA,
+            _STORAGE,
+            _DETECTION,
+            _ENVELOPE,
+            prioritize(diagnose_inventory(initial)),
+            FakeCoordinator(),
+            inventory=InventorySequence(initial, initial),
+            execute=fail,
+        )
+
+    assert error.value.reason is ExecutionFailureReason.RESOURCE_EXHAUSTED
+    assert error.value.committed_progress is False
 
 
 def test_treatment_observer_brackets_only_native_execution() -> None:
@@ -526,6 +561,68 @@ def test_transient_conflicts_use_bounded_exponential_backoff() -> None:
         ("retry_scheduled", ExecutionFailureReason.CONCURRENT_COMPACTION, 10),
         ("retry_scheduled", ExecutionFailureReason.CONCURRENT_COMPACTION, 12),
     ]
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        ExecutionFailureReason.RESOURCE_EXHAUSTED,
+        ExecutionFailureReason.STORAGE_ERROR,
+    ),
+)
+def test_non_transient_zero_progress_failure_blocks_the_table_without_retrying(
+    reason: ExecutionFailureReason,
+) -> None:
+    stop_event = CountingStopEvent(2)
+    observer = RecordingObserver()
+    configuration = RunConfiguration(7, 60, "127.0.0.1", 8_000)
+    selected = TreatmentSelection(
+        kind=TreatmentKind.MERGE,
+        priority_rank=1,
+        metadata_schema="lake",
+        table_id=1,
+        schema_name="main",
+        table_name="table_1",
+        input_bytes=80,
+        admitted_bytes=80,
+        sorting_enabled=True,
+        memory_headroom_bytes=250,
+        usable_memory_bytes=250,
+        max_compacted_files=1,
+        input_files=4,
+        admitted_input_files=4,
+    )
+    blocked: set[tuple[str, int | None]] = set()
+    cycles = 0
+
+    def cycle() -> MaintenanceOutcome:
+        nonlocal cycles
+        cycles += 1
+        if cycles == 1:
+            raise MaintenanceError(
+                "native failure",
+                reason=reason,
+                selection=selected,
+                committed_progress=False,
+            )
+        assert blocked == {("lake", 1)}
+        return no_treatment_outcome()
+
+    run_loop(
+        cycle,
+        configuration,
+        observer,
+        stop_event,  # type: ignore[arg-type]
+        blocked,
+    )
+
+    assert cycles == 2
+    assert blocked == {("lake", 1)}
+    assert (
+        "treatment_blocked",
+        1,
+        reason,
+    ) in observer.events
 
 
 def test_run_loop_replans_stale_work_immediately() -> None:

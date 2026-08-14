@@ -138,6 +138,8 @@ def detect_metadata_backend(
         connection.execute("PRAGMA disable_checkpoint_on_shutdown")
         connection.execute("INSTALL postgres")
         connection.execute("LOAD postgres")
+        connection.execute("INSTALL httpfs")
+        connection.execute("LOAD httpfs")
         connection.execute("INSTALL ducklake")
         connection.execute("LOAD ducklake")
 

@@ -350,6 +350,7 @@ def test_prioritize_command_logs_separate_treatment_lanes(
         sorting_enabled=False,
         input_groups=(),
         waiting_reason=None,
+        ready_groups=0,
     )
     monkeypatch.setattr(
         "lakeducktor.cli.prioritize",

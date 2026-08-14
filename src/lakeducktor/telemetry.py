@@ -93,7 +93,13 @@ class WorkerTelemetry:
         self._watchdog_last_seen = now
         self._stop_requested = False
         self._selection: TreatmentSelection | None = None
+        self._failure_blocked_treatments = 0
+        self._consecutive_cycle_failures = 0
         self._reported_unready_reason: str | None = None
+        self._cycle_stuck_after_seconds = min(
+            treatment_stuck_after_seconds,
+            max(60.0, poll_interval_seconds * 6),
+        )
 
         self._ready = Gauge(
             "lakeducktor_worker_ready",
@@ -158,6 +164,11 @@ class WorkerTelemetry:
             ("reason",),
             registry=self.registry,
         )
+        self._failure_blocked = Gauge(
+            "lakeducktor_failure_blocked_treatments",
+            "Treatments blocked after a non-transient failure made no progress.",
+            registry=self.registry,
+        )
         self._partial_progress = Counter(
             "lakeducktor_treatment_partial_progress_files_total",
             "Input files eliminated despite a failed native treatment.",
@@ -211,9 +222,19 @@ class WorkerTelemetry:
             ("outcome",),
             registry=self.registry,
         )
+        self._consecutive_cycle_failure_metric = Gauge(
+            "lakeducktor_consecutive_cycle_failures",
+            "Consecutive worker cycles that failed before useful maintenance.",
+            registry=self.registry,
+        )
         self._last_cycle = Gauge(
             "lakeducktor_cycle_last_completed_timestamp_seconds",
-            "Unix timestamp of the latest completed worker cycle.",
+            "Unix timestamp of the latest successfully completed worker cycle.",
+            registry=self.registry,
+        )
+        self._orphan_probe_failures = Counter(
+            "lakeducktor_orphan_probe_failures_total",
+            "Storage-aware orphan probes that failed and were isolated.",
             registry=self.registry,
         )
         self._actionable_tables = Gauge(
@@ -460,26 +481,45 @@ class WorkerTelemetry:
         self._treatment_retries.labels(reason=reason.value).inc()
         self._treatment_backoff.labels(reason=reason.value).observe(duration_seconds)
 
+    def treatment_blocked(
+        self,
+        selection: TreatmentSelection,
+        reason: ExecutionFailureReason,
+    ) -> None:
+        del selection, reason
+        with self._lock:
+            self._failure_blocked_treatments += 1
+            blocked = self._failure_blocked_treatments
+        self._failure_blocked.set(blocked)
+
+    def orphan_probe_completed(self, success: bool) -> None:
+        if not success:
+            self._orphan_probe_failures.inc()
+
     def cycle_completed(self, outcome: MaintenanceOutcome) -> None:
         self._cycles.labels(outcome=outcome.state.value).inc()
         self._claim_contention.inc(outcome.claim_contention)
         self._last_cycle.set(self._wall_clock())
         with self._lock:
             now = self._clock()
+            self._consecutive_cycle_failures = 0
             self._phase = WorkerPhase.IDLE
             self._phase_started = now
             self._idle_deadline = now
             self._selection = None
+        self._consecutive_cycle_failure_metric.set(0)
 
     def cycle_failed(self) -> None:
         self._cycles.labels(outcome="failure").inc()
-        self._last_cycle.set(self._wall_clock())
         with self._lock:
             now = self._clock()
+            self._consecutive_cycle_failures += 1
+            consecutive_failures = self._consecutive_cycle_failures
             self._phase = WorkerPhase.ERROR
             self._phase_started = now
             self._idle_deadline = now
             self._selection = None
+        self._consecutive_cycle_failure_metric.set(consecutive_failures)
 
     def idle(self, duration_seconds: float) -> None:
         with self._lock:
@@ -506,7 +546,12 @@ class WorkerTelemetry:
         self._set_health_metrics(snapshot)
         unready_reason = None if snapshot.ready else snapshot.reason
         if unready_reason != self._reported_unready_reason:
-            if unready_reason in {"treatment_stuck", "cycle_stuck", "loop_stuck"}:
+            if unready_reason in {
+                "treatment_stuck",
+                "cycle_stuck",
+                "loop_stuck",
+                "cycle_failed",
+            }:
                 selection = self.current_selection()
                 _LOGGER.error(
                     "worker_not_ready reason=%s phase=%s "
@@ -522,6 +567,7 @@ class WorkerTelemetry:
                 "treatment_stuck",
                 "cycle_stuck",
                 "loop_stuck",
+                "cycle_failed",
             }:
                 _LOGGER.info(
                     "worker_ready previous_reason=%s",
@@ -556,7 +602,7 @@ class WorkerTelemetry:
                 return HealthSnapshot(True, False, phase, "stopping", phase_age)
             if phase is WorkerPhase.STARTING:
                 return HealthSnapshot(True, False, phase, "starting", phase_age)
-            if phase is WorkerPhase.ERROR:
+            if self._consecutive_cycle_failures:
                 return HealthSnapshot(True, False, phase, "cycle_failed", phase_age)
             if phase is WorkerPhase.TREATING and phase_age > self._stuck_after_seconds:
                 return HealthSnapshot(
@@ -566,12 +612,23 @@ class WorkerTelemetry:
                     "treatment_stuck",
                     phase_age,
                 )
-            if phase is WorkerPhase.CYCLING and phase_age > self._stuck_after_seconds:
+            if (
+                phase is WorkerPhase.CYCLING
+                and phase_age > self._cycle_stuck_after_seconds
+            ):
                 return HealthSnapshot(
                     True,
                     False,
                     phase,
                     "cycle_stuck",
+                    phase_age,
+                )
+            if self._failure_blocked_treatments:
+                return HealthSnapshot(
+                    True,
+                    False,
+                    phase,
+                    "treatment_blocked",
                     phase_age,
                 )
             if (

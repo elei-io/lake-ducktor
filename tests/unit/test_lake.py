@@ -110,6 +110,8 @@ def test_detection_never_detaches_a_ducklake_or_checkpoints_on_shutdown() -> Non
     assert detection.metadata_schemas == ("lake_a", "lake_b")
     queries = [call.args[0] for call in connection.execute.call_args_list]
     assert queries[0] == "PRAGMA disable_checkpoint_on_shutdown"
+    assert "INSTALL httpfs" in queries
+    assert "LOAD httpfs" in queries
     assert sum("ATTACH 'ducklake:" in query for query in queries) == 2
     assert not any("DETACH lakeducktor_lake" in query for query in queries)
     assert connection.close.call_count == 1

@@ -16,6 +16,11 @@ Merge debt on an actively written table waits until a compatible group has 32
 candidate files or one target file's worth of candidate bytes. The debt
 remains observable while waiting. After one minute without inserted files,
 productive merge tails drain without the active-writer threshold.
+Once the table-level gate opens, admission includes all productive compatible
+groups within the normal 512-input and memory bounds because DuckLake chooses
+groups at table scope.
+For a sorted table, admission is intentionally stricter: one compacted output
+per call and an eight-times compressed-input memory allowance.
 
 Scheduled-file eligibility is obtained from DuckLake's own read-only cleanup
 dry run. The worker does not override `delete_older_than`; a cleanup treatment
@@ -25,7 +30,10 @@ Snapshot-expiration eligibility is obtained from DuckLake's native dry run
 without overriding `expire_older_than`. Orphan eligibility requires a storage
 walk, so the worker performs it at startup and then every
 `ORPHAN_SCAN_INTERVAL_SECONDS` instead of every poll. Orphan deletion likewise
-uses DuckLake's stored/default `delete_older_than`.
+uses DuckLake's stored/default `delete_older_than`. A storage race or transient
+file disappearance can fail the diagnostic walk; that failure disables only
+orphan cleanup until the next scan interval. Other maintenance continues, and
+`lakeducktor_orphan_probe_failures_total` reports the degraded housekeeping.
 
 A pod performs one treatment at a time. Each treatment runs in an isolated
 child process and creates its own DuckDB connection. Connections are never
@@ -49,11 +57,16 @@ The server listens on `METRICS_HOST:METRICS_PORT` and exposes:
 - `/readyz` — the worker is accepting work and making timely progress
 - `/metrics` — Prometheus metrics
 
-Readiness returns `503` after a failed cycle, when a cycle or treatment runs
-longer than `TREATMENT_STUCK_AFTER_SECONDS`, or when the loop fails to wake
-after its idle deadline. An overdue treatment remains live so Kubernetes does
-not repeatedly kill potentially useful work; alert on failed readiness and the
-stuck metrics.
+Readiness returns `503` after a failed cycle and remains failed throughout
+subsequent attempts until one completes successfully. Inventory cycles are
+considered stuck after the smaller of `TREATMENT_STUCK_AFTER_SECONDS` and a
+poll-derived bound of at least 60 seconds. Treatments retain the configured
+threshold. The worker is also unready when the loop fails to wake after its
+idle deadline. A non-transient treatment failure with verified zero progress
+blocks that table for the worker lifetime and also keeps readiness at `503`; it
+is never retried automatically. An overdue treatment remains live so
+Kubernetes does not repeatedly kill potentially useful work; alert on failed
+readiness and the stuck metrics.
 
 On `SIGTERM` or `SIGINT`, the worker becomes unready, admits no new treatment,
 terminates an active isolated treatment, re-inventories any committed progress,
