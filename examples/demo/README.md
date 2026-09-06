@@ -1,7 +1,7 @@
 # Disposable demo
 
 Requires Docker with Compose and internet access for the first build. The build
-compiles the pinned DuckLake extension and can take several minutes. No existing
+compiles DuckDB and the pinned DuckLake extension and can take tens of minutes. No existing
 lake, host credentials, or external Docker network is used. PostgreSQL is not
 published on a host port; the sample password is for this isolated example only.
 

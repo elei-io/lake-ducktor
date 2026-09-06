@@ -1,0 +1,15 @@
+{
+  "verified_on": "2026-09-06",
+  "platform": "linux/arm64",
+  "duckdb": "1.5.5",
+  "ducklake_extension_version": "d8a1881e",
+  "ducklake_patch": "vendor/ducklake/0001-external-hive-compaction.patch",
+  "image_id": "sha256:1a484ddbc447f983a185db9c7a1578f834517f645a29ceb5711416d37d5eee2f",
+  "command": "docker compose -f examples/demo/compose.yml run --build --rm demo",
+  "rows_before": 4000,
+  "rows_after": 4000,
+  "files_before": 40,
+  "files_after": 1,
+  "exact_row_match": true,
+  "scope": "Compaction smoke test; not a throughput benchmark or concurrency/deletion test."
+}

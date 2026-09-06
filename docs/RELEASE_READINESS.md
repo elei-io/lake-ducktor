@@ -30,13 +30,14 @@ infrastructure software with a reproducible correctness demo.
 - Workflow syntax checked with actionlint; demo Compose configuration validated.
 - Gitleaks 8.30.1 found no findings in all 18 original commits or the working tree.
   This is a tool result, not proof that every possible sensitive value is absent.
-- The initial demo passed using current source mounted into the existing native
-  image. A clean source build and a repeat using that image are tracked separately
-  below before claiming a fully reproduced container release.
+- A clean native image build passed on Linux/ARM64. The documented demo command
+  then rebuilt the final application layer from the public checkout and passed:
+  40 active files became 1, with exact preservation of 4,000 rows. The container's
+  non-root UID, MIT metadata, copyright notice, and default-disabled orphan
+  cleanup were also verified. See [recorded result](../examples/demo/result.json).
 
 ## Before publication
 
-- Finish clean container build and demo verification; record the result here.
 - Review the prepared public checkout, which replaces the personal author and
   committer email with the existing GitHub no-reply identity. Keep the original
   repository private as a backup. Rewritten commits have different IDs.
