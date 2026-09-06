@@ -46,8 +46,11 @@ infrastructure software with a reproducible correctness demo.
 - Enable private vulnerability reporting and select the final public repository
   destination. Publishing or force-pushing is a separate deliberate action.
 - Complete a dependency/license inventory before publishing binary images.
-- Validate whether an available signed DuckLake release for DuckDB 1.5.5 includes
-  the external Hive-path fix before removing the patch or unsigned exception.
+- Follow the artifact, regression, and cleanup checks in the
+  [compatibility-patch retirement runbook](DUCKLAKE_COMPATIBILITY.md#retiring-the-compatibility-patch)
+  before removing the patch or unsigned-extension exception. A merge into
+  DuckLake `main` alone does not show that the signed extension for the selected
+  DuckDB release contains the fix.
 
 ## Follow-up roadmap
 

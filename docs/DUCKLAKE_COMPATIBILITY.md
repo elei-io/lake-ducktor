@@ -28,5 +28,43 @@ The pin was verified against Atlas's external, Hive-partitioned files on
 lake from snapshot 611 to 612, reduced active files from 2,039 to 2,034, and
 wrote the result under DuckLake's canonical table/partition path.
 
-Remove the patch and unsigned-extension exception once a stable DuckLake build
-for the selected DuckDB release contains the upstream regression fix.
+## Retiring the compatibility patch
+
+Do not remove the patch merely because PR #1181 is merged into DuckLake's
+`main` branch. The extension installed by `INSTALL ducklake` is built for a
+specific DuckDB release and can come from a release branch that does not contain
+the fix. Retire the patch only when all of these conditions are true:
+
+1. A stable DuckDB release supported by LakeDucktor has a signed `ducklake`
+   extension in the `core` repository.
+2. The source revision reported by that installed extension contains commit
+   `9ef79528c09ad598a1913c6bc84b16c885a79059` or an equivalent upstream fix.
+   Confirm this from the DuckLake source history; the existence of the merged
+   pull request on another branch is not sufficient.
+3. A disposable regression run passes with that signed extension. The fixture
+   must register Hive-partitioned Parquet files from a directory outside the
+   DuckLake table's `DATA_PATH` using `ducklake_add_data_files`, run
+   `ducklake_merge_adjacent_files`, and verify all of the following:
+   - the complete row set is unchanged;
+   - the number of active files decreases;
+   - the new active file is under DuckLake's canonical table and Hive-partition
+     path; and
+   - compaction does not create a path containing a nested copy of the external
+     source path.
+
+The ordinary disposable demo is not sufficient for this decision because it
+creates its source files inside DuckLake's managed data path.
+
+After those checks pass:
+
+1. Replace the source-built extension installation in the container with
+   `INSTALL ducklake` from the default signed `core` repository.
+2. Remove the DuckLake/CRoaring builder stage, the vendored patch, and the
+   vendored DuckLake license if no other vendored DuckLake material remains.
+3. Remove `DUCKDB_ALLOW_UNSIGNED_EXTENSIONS` from the container. Remove the
+   corresponding connection configuration and tests if no other supported
+   deployment needs unsigned extensions.
+4. Update `README.md`, `SECURITY.md`, `THIRD_PARTY_NOTICES.md`, this document,
+   and the recorded demo metadata so none describes the retired custom build.
+5. Rebuild the image from a clean checkout and run the full unit, lint, package,
+   disposable-demo, and external-Hive regression checks before publishing it.
