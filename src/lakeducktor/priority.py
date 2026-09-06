@@ -73,9 +73,7 @@ def _tables(diagnosis: CatalogDiagnosis) -> tuple[TableDiagnosis, ...]:
 def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
     """Create separate, explainable rewrite and merge rankings."""
 
-    expiration_lakes = [
-        lake for lake in diagnosis.lakes if lake.expiring_snapshots > 0
-    ]
+    expiration_lakes = [lake for lake in diagnosis.lakes if lake.expiring_snapshots > 0]
     expiration_lakes.sort(
         key=lambda lake: (
             -lake.expiring_snapshots,
@@ -311,15 +309,9 @@ def prioritize(diagnosis: CatalogDiagnosis) -> PriorityPlan:
                 adjusted_expected_files_eliminated=float(adjusted_eliminations),
                 sorting_enabled=table.sorting_enabled,
                 minimum_input_file_bytes=(table.minimum_merge_candidate_file_bytes),
-                input_groups=(
-                    table.merge_candidate_groups
-                    if ready
-                    else ()
-                ),
+                input_groups=(table.merge_candidate_groups if ready else ()),
                 waiting_reason=(
-                    "active_writer_batching"
-                    if not blocked and not ready
-                    else None
+                    "active_writer_batching" if not blocked and not ready else None
                 ),
                 ready_groups=len(ready_groups),
             )

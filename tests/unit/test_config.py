@@ -104,12 +104,29 @@ def test_relative_filesystem_storage_path_is_rejected() -> None:
         )
 
 
-def test_storage_endpoint_path_is_rejected() -> None:
+def test_storage_endpoint_path_is_preserved_without_a_trailing_slash() -> None:
+    configuration = StorageConfiguration.from_environment(
+        {
+            "CATALOG_STORAGE": "s3-compatible",
+            "CATALOG_STORAGE_ENDPOINT": "http://lake-s3:39999/api/v1/s3/",
+            "CATALOG_STORAGE_REGION": "us-east-1",
+            "CATALOG_STORAGE_ACCESS_KEY_ID": "key",
+            "CATALOG_STORAGE_SECRET_ACCESS_KEY": "secret",
+            "CATALOG_STORAGE_BUCKET": "lake",
+        }
+    )
+
+    assert configuration.endpoint == "lake-s3:39999/api/v1/s3"
+    assert configuration.use_ssl is False
+
+
+@pytest.mark.parametrize("suffix", ["?version=1", "#fragment"])
+def test_storage_endpoint_query_and_fragment_are_rejected(suffix: str) -> None:
     with pytest.raises(ConfigurationError, match="must not contain"):
         StorageConfiguration.from_environment(
             {
                 "CATALOG_STORAGE": "s3-compatible",
-                "CATALOG_STORAGE_ENDPOINT": "http://objects.example/path",
+                "CATALOG_STORAGE_ENDPOINT": f"http://objects.example/path{suffix}",
                 "CATALOG_STORAGE_REGION": "us-east-1",
                 "CATALOG_STORAGE_ACCESS_KEY_ID": "key",
                 "CATALOG_STORAGE_SECRET_ACCESS_KEY": "secret",
@@ -128,6 +145,7 @@ def test_run_configuration_defaults_are_boring() -> None:
     assert configuration.conflict_backoff_base_seconds == 5
     assert configuration.conflict_backoff_max_seconds == 60
     assert configuration.orphan_scan_interval_seconds == 3_600
+    assert configuration.orphan_cleanup_enabled is False
 
 
 def test_run_configuration_accepts_operational_overrides() -> None:
@@ -140,6 +158,7 @@ def test_run_configuration_accepts_operational_overrides() -> None:
             "CONFLICT_BACKOFF_BASE_SECONDS": "3",
             "CONFLICT_BACKOFF_MAX_SECONDS": "30",
             "ORPHAN_SCAN_INTERVAL_SECONDS": "1800",
+            "ORPHAN_CLEANUP_ENABLED": "false",
         }
     )
 
@@ -150,6 +169,7 @@ def test_run_configuration_accepts_operational_overrides() -> None:
     assert configuration.conflict_backoff_base_seconds == 3
     assert configuration.conflict_backoff_max_seconds == 30
     assert configuration.orphan_scan_interval_seconds == 1_800
+    assert configuration.orphan_cleanup_enabled is False
 
 
 @pytest.mark.parametrize(
@@ -163,8 +183,25 @@ def test_run_configuration_accepts_operational_overrides() -> None:
         ("CONFLICT_BACKOFF_BASE_SECONDS", "0"),
         ("CONFLICT_BACKOFF_MAX_SECONDS", "nan"),
         ("ORPHAN_SCAN_INTERVAL_SECONDS", "0"),
+        ("ORPHAN_CLEANUP_ENABLED", "sometimes"),
     ],
 )
 def test_invalid_run_configuration_is_rejected(name: str, value: str) -> None:
     with pytest.raises(ConfigurationError):
         RunConfiguration.from_environment({name: value})
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"MAINTAIN_LAKES": "lake_a"},
+        {"METADATA_DATABASE_SCHEMA": "lake_a"},
+        {"MAINTAIN_ALL_LAKES": "true"},
+    ],
+)
+def test_explicit_maintenance_scope_is_accepted(settings):
+    from lakeducktor.config import require_maintenance_scope
+
+    require_maintenance_scope(
+        MetadataConfiguration.from_environment(postgres_environment(**settings))
+    )

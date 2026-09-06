@@ -341,3 +341,36 @@ def test_native_error_message_is_single_line_and_bounded() -> None:
     assert "\n" not in message
     assert len(message) <= len("IOException: ") + 80
     assert message.endswith("...")
+
+
+def test_native_error_redacts_secrets_before_truncation(monkeypatch):
+    from urllib.parse import quote
+
+    import duckdb
+
+    from lakeducktor.executor import concise_duckdb_error
+
+    secret = "demo/password+private"
+    monkeypatch.setenv("METADATA_DATABASE_PASSWORD", secret)
+    message = (
+        f"Connection failed postgresql://demo:{quote(secret, safe='')}@db/db {secret}"
+    )
+    result = concise_duckdb_error(duckdb.Error(message))
+    assert secret not in result
+    assert quote(secret, safe="") not in result
+    assert "[REDACTED]" in result
+    assert "Connection failed" in result
+    assert secret[:6] not in concise_duckdb_error(duckdb.Error(secret), limit=8)
+
+
+def test_native_error_redacts_sql_escaped_and_multiline_secrets(monkeypatch):
+    import duckdb
+
+    from lakeducktor.executor import concise_duckdb_error
+
+    secret = "secret'with\nnewline"
+    monkeypatch.setenv("CATALOG_STORAGE_SECRET_ACCESS_KEY", secret)
+    for value in [secret, secret.replace("'", "''")]:
+        result = concise_duckdb_error(duckdb.Error("failure " + value))
+        assert "[REDACTED]" in result
+        assert "newline" not in result

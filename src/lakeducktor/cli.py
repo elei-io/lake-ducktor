@@ -15,6 +15,7 @@ from lakeducktor.config import (
     RunConfiguration,
     StorageConfiguration,
     load_env_file,
+    require_maintenance_scope,
 )
 from lakeducktor.coordination import PostgresTreatmentCoordinator
 from lakeducktor.daemon import MaintenanceError, RunError, maintain_once, run_service
@@ -85,6 +86,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         load_env_file(arguments.env_file)
         configuration = MetadataConfiguration.from_environment()
+        if arguments.command in {"maintain", "run"}:
+            require_maintenance_scope(configuration)
         envelope = (
             resource_envelope_from_environment()
             if arguments.command in {"select", "maintain", "run"}
@@ -131,10 +134,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         "maintain",
     }:
         assert storage is not None
-        maintenance_inventory = MaintenanceInventory(storage)
         try:
+            maintenance_inventory = MaintenanceInventory(storage)
             inventory = maintenance_inventory(configuration, detection)
-        except InventoryError as error:
+        except (ConfigurationError, InventoryError) as error:
             _LOGGER.error("inventory_failed error=%s", error)
             return 1
         for lake in inventory.lakes:

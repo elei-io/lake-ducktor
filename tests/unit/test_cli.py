@@ -209,8 +209,8 @@ def test_diagnose_command_logs_lake_and_table_explanations(
     )
     monkeypatch.setattr(
         "lakeducktor.cli.MaintenanceInventory",
-        lambda _storage: lambda _configuration, _detection: SimpleNamespace(
-            lakes=(inventory_lake,)
+        lambda _storage: (
+            lambda _configuration, _detection: SimpleNamespace(lakes=(inventory_lake,))
         ),
     )
     table_diagnosis = SimpleNamespace(
@@ -309,8 +309,8 @@ def test_prioritize_command_logs_separate_treatment_lanes(
     )
     monkeypatch.setattr(
         "lakeducktor.cli.MaintenanceInventory",
-        lambda _storage: lambda _configuration, _detection: SimpleNamespace(
-            lakes=(inventory_lake,)
+        lambda _storage: (
+            lambda _configuration, _detection: SimpleNamespace(lakes=(inventory_lake,))
         ),
     )
     monkeypatch.setattr(
@@ -429,8 +429,8 @@ def test_select_command_logs_resource_envelope_and_one_treatment(
     )
     monkeypatch.setattr(
         "lakeducktor.cli.MaintenanceInventory",
-        lambda _storage: lambda _configuration, _detection: SimpleNamespace(
-            lakes=(inventory_lake,)
+        lambda _storage: (
+            lambda _configuration, _detection: SimpleNamespace(lakes=(inventory_lake,))
         ),
     )
     monkeypatch.setattr(
@@ -493,7 +493,9 @@ def test_maintain_command_logs_verified_treatment_outcome(
     tmp_path,
 ) -> None:
     caplog.set_level(logging.INFO, logger="lakeducktor")
-    configuration = object()
+    configuration = SimpleNamespace(
+        schema="lake", maintain_lakes=(), maintain_all_lakes=False
+    )
     storage = object()
     envelope = ResourceEnvelope(4, "4GB", 4_000_000_000)
     monkeypatch.setattr(
@@ -532,8 +534,8 @@ def test_maintain_command_logs_verified_treatment_outcome(
     )
     monkeypatch.setattr(
         "lakeducktor.cli.MaintenanceInventory",
-        lambda _storage: lambda _configuration, _detection: SimpleNamespace(
-            lakes=(inventory_lake,)
+        lambda _storage: (
+            lambda _configuration, _detection: SimpleNamespace(lakes=(inventory_lake,))
         ),
     )
     monkeypatch.setattr(
@@ -593,7 +595,9 @@ def test_run_command_delegates_without_a_one_shot_detection(
     monkeypatch,
     tmp_path,
 ) -> None:
-    metadata = object()
+    metadata = SimpleNamespace(
+        schema="lake", maintain_lakes=(), maintain_all_lakes=False
+    )
     storage = object()
     envelope = ResourceEnvelope(4, "4GB", 4_000_000_000)
     run_configuration = object()
@@ -629,3 +633,21 @@ def test_run_command_delegates_without_a_one_shot_detection(
 
     assert result == 0
     assert calls == [(metadata, storage, envelope, run_configuration)]
+
+
+@pytest.mark.parametrize("command", ["maintain", "run"])
+def test_mutating_commands_require_scope_before_connecting(
+    monkeypatch, tmp_path, command
+):
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(
+        "lakeducktor.cli.MetadataConfiguration.from_environment",
+        lambda: SimpleNamespace(
+            schema=None, maintain_lakes=(), maintain_all_lakes=False
+        ),
+    )
+    connect = Mock()
+    monkeypatch.setattr("lakeducktor.cli.detect_metadata_backend", connect)
+    assert main(["--env-file", str(tmp_path / "missing"), command]) == 1
+    connect.assert_not_called()

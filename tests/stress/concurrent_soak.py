@@ -33,7 +33,16 @@ from lakeducktor.config import (
 )
 from lakeducktor.coordination import advisory_lock_key
 
-LAKE_SCHEMA = "ducklake_b545b95f250a49f28b753109d95b13ed"
+
+def lake_schema() -> str:
+    """Require an explicit disposable catalog for every harness process."""
+    load_env_file(Path(".env"))
+    schema = os.environ.get("SOAK_METADATA_SCHEMA", "").strip()
+    if not re.fullmatch(r"[a-z_][a-z0-9_]*", schema):
+        raise ValueError("Set SOAK_METADATA_SCHEMA to a disposable lake schema")
+    return schema
+
+
 TARGET_FILE_SIZE = "5MB"
 TARGET_FILE_SIZE_BYTES = 5_000_000
 TABLE_KINDS = ("tiny", "medium", "large")
@@ -105,7 +114,7 @@ def open_lake(alias: str = "soak") -> duckdb.DuckDBPyConnection:
         connection.execute(
             f"""
             ATTACH 'ducklake:postgres:{uri}' AS {alias} (
-                METADATA_SCHEMA '{LAKE_SCHEMA}',
+                METADATA_SCHEMA '{lake_schema()}',
                 CREATE_IF_NOT_EXISTS false
             )
             """
@@ -301,9 +310,9 @@ def seed_gaps(run_id: str, kind: str) -> list[tuple[int, int]]:
                   AND columns.column_id = 1
                 """
             ).format(
-                sql.Identifier(LAKE_SCHEMA),
-                sql.Identifier(LAKE_SCHEMA),
-                sql.Identifier(LAKE_SCHEMA),
+                sql.Identifier(lake_schema()),
+                sql.Identifier(lake_schema()),
+                sql.Identifier(lake_schema()),
             ),
             [table],
         ).fetchall()
@@ -613,21 +622,21 @@ def catalog_stats(run_id: str) -> dict[str, dict[str, int | bool]]:
                         GROUP BY tables.table_id, tables.schema_id
                         """
                 ).format(
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
-                    sql.Identifier(LAKE_SCHEMA),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
+                    sql.Identifier(lake_schema()),
                 ),
                 [table],
             )
@@ -928,7 +937,7 @@ def orchestrate(
         encoding="utf-8",
     )
     base_environment = dict(os.environ)
-    base_environment["MAINTAIN_LAKES"] = LAKE_SCHEMA
+    base_environment["MAINTAIN_LAKES"] = lake_schema()
     base_environment["POLL_INTERVAL_SECONDS"] = "5"
     base_environment["TREATMENT_STUCK_AFTER_SECONDS"] = "900"
     executable = str(Path(sys.executable).with_name("lakeducktor"))
@@ -1194,7 +1203,7 @@ def crash_recovery(
         encoding="utf-8",
     )
     environment = dict(os.environ)
-    environment["MAINTAIN_LAKES"] = LAKE_SCHEMA
+    environment["MAINTAIN_LAKES"] = lake_schema()
     environment["POLL_INTERVAL_SECONDS"] = "1"
     environment["TREATMENT_STUCK_AFTER_SECONDS"] = "30"
     executable = str(Path(sys.executable).with_name("lakeducktor"))
@@ -1241,7 +1250,7 @@ def crash_recovery(
         os.killpg(first.pid, signal.SIGKILL)
         first.wait(timeout=10)
         lock_release_seconds = _verify_advisory_lock_released(
-            LAKE_SCHEMA,
+            lake_schema(),
         )
         _append_json(
             events_path,

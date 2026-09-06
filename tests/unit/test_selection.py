@@ -285,9 +285,7 @@ def test_sorted_merge_admits_one_small_compatible_group() -> None:
 
 
 def test_sorted_merge_is_deferred_when_one_group_exceeds_memory_allowance() -> None:
-    groups = (
-        CompatibleFileGroup(1, 1, 2, 251_000_000, 2, 251_000_000),
-    )
+    groups = (CompatibleFileGroup(1, 1, 2, 251_000_000, 2, 251_000_000),)
     candidate = replace(
         merge(1, 1, target=512_000_000, input_groups=groups),
         sorting_enabled=True,

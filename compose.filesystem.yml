@@ -1,0 +1,4 @@
+services:
+  lakeducktor:
+    volumes:
+      - ${LAKE_HOST_PATH:?Set LAKE_HOST_PATH}:${LAKE_CONTAINER_PATH:-/lake}

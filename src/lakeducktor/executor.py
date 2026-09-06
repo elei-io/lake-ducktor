@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -9,6 +11,7 @@ from multiprocessing import get_context
 from multiprocessing.connection import Connection
 from threading import Event
 from typing import Protocol
+from urllib.parse import quote
 
 import duckdb
 
@@ -109,7 +112,28 @@ def classify_duckdb_error(error: duckdb.Error) -> ExecutionFailureReason:
 def concise_duckdb_error(error: duckdb.Error, limit: int = 500) -> str:
     """Return one bounded log-safe line retaining the native failure cause."""
 
-    message = " ".join(str(error).split())
+    message = str(error)
+    # Redact before truncation so a long message cannot expose a partial secret.
+    for name in (
+        "METADATA_DATABASE_PASSWORD",
+        "CATALOG_STORAGE_ACCESS_KEY_ID",
+        "CATALOG_STORAGE_SECRET_ACCESS_KEY",
+    ):
+        value = os.environ.get(name, "")
+        if value:
+            for representation in sorted(
+                {value, quote(value, safe=""), value.replace("'", "''")},
+                key=len,
+                reverse=True,
+            ):
+                message = message.replace(representation, "[REDACTED]")
+    message = re.sub(
+        r"([a-z][a-z0-9+.-]*://)[^/\s@]+@",
+        r"\1[REDACTED]@",
+        message,
+        flags=re.IGNORECASE,
+    )
+    message = " ".join(message.split())
     if len(message) > limit:
         message = message[: limit - 3] + "..."
     return f"{type(error).__name__}: {message}"

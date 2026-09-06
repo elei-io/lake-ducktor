@@ -68,7 +68,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY_NOTICES.md ./
+COPY vendor/ducklake/LICENSE vendor/ducklake/LICENSE
 COPY src/ src/
 COPY --from=ducklake-builder \
     /build/ducklake/build/release/extension/ducklake/ducklake.duckdb_extension \

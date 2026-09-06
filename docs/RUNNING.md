@@ -34,6 +34,9 @@ uses DuckLake's stored/default `delete_older_than`. A storage race or transient
 file disappearance can fail the diagnostic walk; that failure disables only
 orphan cleanup until the next scan interval. Other maintenance continues, and
 `lakeducktor_orphan_probe_failures_total` reports the degraded housekeeping.
+The example configuration sets `ORPHAN_CLEANUP_ENABLED=false`. Keep it disabled when the configured DuckLake data path shares
+its root with objects owned by another application. This skips both orphan
+detection and deletion while leaving all other maintenance enabled.
 
 A pod performs one treatment at a time. Each treatment runs in an isolated
 child process and creates its own DuckDB connection. Connections are never
@@ -101,29 +104,21 @@ bind-mounted directory while LakeDucktor runs on the host. The catalogue's
 schema, table, and active file paths must be relative to the DuckLake data
 root; absolute file registrations cannot be relocated this way.
 
-Build the LakeDucktor image and run a read-only inventory smoke test:
+Build the LakeDucktor image and run a read-only inventory smoke test with the
+filesystem Compose override:
 
 ```sh
-docker compose build
-docker compose run --rm lakeducktor inventory
+docker compose -f compose.yml -f compose.filesystem.yml build
+docker compose -f compose.yml -f compose.filesystem.yml run --rm lakeducktor inventory
 ```
 
 The image currently includes a source-pinned DuckLake compatibility backport;
 see [DuckLake compatibility pin](DUCKLAKE_COMPATIBILITY.md).
 
-The Compose project is LakeDucktor and is not tied to a particular producer.
-Configure its metadata network and shared lake path in `.env`. For example, a
-local Atlas deployment that stores its state in `/Users/me/Code/atlas/.atlas`
-and uses the `atlas_default` network needs:
-
-```sh
-CONTAINER_METADATA_DATABASE_HOST=atlas-test-postgres
-CONTAINER_METADATA_DATABASE_PORT=5432
-CONTAINER_CATALOG_DATA_PATH=/app/.atlas/lake/
-LAKE_HOST_PATH=/Users/me/Code/atlas/.atlas
-LAKE_CONTAINER_PATH=/app/.atlas
-LAKEDUCKTOR_DOCKER_NETWORK=atlas_default
-```
+Configure the external metadata network and shared data path in `.env` using
+values from your own deployment. The worker defaults to UID/GID 10001; grant
+that identity access to the mounted lake directory, or configure an appropriate
+non-root identity for your environment.
 
 The producer and LakeDucktor must mount the same host data. Preserve the
 producer's container path when the catalogue contains absolute registered file
@@ -134,5 +129,45 @@ The image and Compose service default to `lakeducktor run`. Use explicit
 one-shot commands for smoke tests, and start the worker with:
 
 ```sh
+docker compose -f compose.yml -f compose.filesystem.yml up lakeducktor
+```
+
+## Alluxio S3 proxy
+
+LakeDucktor can maintain a lake through the same Alluxio S3 proxy used by its
+writers. It must connect to both the existing DuckLake metadata database and
+the S3 proxy; access to Alluxio or its under-store alone is not enough to
+identify the lake.
+
+Join the network shared by the metadata database and S3 proxy. Configure
+`METADATA_DATABASE_*` for the existing PostgreSQL database and
+`CATALOG_STORAGE_*` for the proxy's endpoint, bucket, and credentials. Set
+`MAINTAIN_LAKES` to the intended schema and `LAKEDUCKTOR_DOCKER_NETWORK` to that
+network's name. See `.env.example` for the complete variable names.
+
+No lake volume is mounted for S3-compatible storage. Run `inventory` first to
+verify the attachment without mutating the lake, then start the worker:
+
+```sh
+docker compose run --rm lakeducktor inventory
 docker compose up lakeducktor
 ```
+
+All maintenance reads, compaction outputs, and file deletions use that proxy.
+Consequently, Alluxio's write type, replication, persistence, and under-store
+settings remain the storage authority for LakeDucktor operations too.
+
+## First-run scope and policy
+
+Use `inventory` and `select` before `maintain` or `run`. Explicitly set
+`MAINTAIN_LAKES` or `METADATA_DATABASE_SCHEMA`. Without either, `maintain` and
+`run` require the explicit opt-in `MAINTAIN_ALL_LAKES=true`. Read-only discovery
+can still inspect all schemas. Orphan cleanup
+is disabled by default. Enable it explicitly only after reviewing the storage
+root. Existing deployments that need orphan cleanup must now set
+`ORPHAN_CLEANUP_ENABLED=true`.
+The setting applies to one-shot commands as well as the service.
+
+Disabling orphan cleanup does not disable snapshot expiration or deletion of
+scheduled obsolete files. Those operations follow persisted/native DuckLake
+policy. Inspect that policy before enabling maintenance.

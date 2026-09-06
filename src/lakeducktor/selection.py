@@ -215,8 +215,7 @@ def _merge_selection(
             productive_groups = tuple(
                 group
                 for group in candidate.input_groups
-                if group.merge_candidate_files >= 2
-                and group.merge_candidate_bytes > 0
+                if group.merge_candidate_files >= 2 and group.merge_candidate_bytes > 0
             )
             if not productive_groups:
                 raise SelectionError(
@@ -229,9 +228,7 @@ def _merge_selection(
             largest_group_files = max(
                 group.merge_candidate_files for group in productive_groups
             )
-            input_memory_limit = (
-                usable_memory // _SORTED_MERGE_INPUT_MEMORY_MULTIPLIER
-            )
+            input_memory_limit = usable_memory // _SORTED_MERGE_INPUT_MEMORY_MULTIPLIER
             if (
                 input_memory_limit <= 0
                 or largest_group_bytes > input_memory_limit
@@ -387,9 +384,7 @@ def select_treatment(
         if key in unavailable_tables:
             continue
         available_runnable += 1
-        fitting_expirations.append(
-            _snapshot_expiration_selection(candidate, envelope)
-        )
+        fitting_expirations.append(_snapshot_expiration_selection(candidate, envelope))
 
     for candidate in plan.scheduled_file_cleanups:
         key = (candidate.metadata_schema, None)

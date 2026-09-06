@@ -87,8 +87,7 @@ def test_disabled_inlining_flushes_any_rows_left_from_the_old_policy() -> None:
 
 def test_inline_flush_row_threshold_scales_with_existing_groups() -> None:
     groups = tuple(
-        CompatibleFileGroup(1, partition, 1, 100, 1, 100)
-        for partition in range(4)
+        CompatibleFileGroup(1, partition, 1, 100, 1, 100) for partition in range(4)
     )
 
     below = diagnose_table(

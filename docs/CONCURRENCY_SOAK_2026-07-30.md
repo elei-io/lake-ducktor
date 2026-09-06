@@ -1,5 +1,8 @@
 # Concurrent writer/maintenance soak — 2026-07-30
 
+> Historical report: the follow-up retest below supersedes this run.
+> Do not treat the original blockers or measurements as current release status.
+
 The follow-up work and clean retest are documented in
 [Concurrency retest](CONCURRENCY_RETEST_2026-07-30.md).
 

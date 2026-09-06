@@ -401,6 +401,7 @@ def test_maintenance_inventory_isolates_and_throttles_orphan_probe_failure() -> 
     collector = MaintenanceInventory(
         storage,
         orphan_scan_interval_seconds=3_600,
+        orphan_cleanup_enabled=True,
         clock=lambda: now[0],
         orphan_probe_observer=probe_outcomes.append,
     )
@@ -440,3 +441,49 @@ def test_maintenance_inventory_isolates_and_throttles_orphan_probe_failure() -> 
         assert collector(configuration, detection).lakes[0].orphan_files == 0
 
     assert probe_outcomes == [False, True]
+
+
+def test_maintenance_inventory_can_disable_orphan_cleanup() -> None:
+    storage = StorageConfiguration(provider="filesystem", data_path="/lakes/")
+    detection = BackendDetection(
+        backend=MetadataBackend.POSTGRES,
+        metadata_schemas=("lake",),
+        extension_version="v1",
+        duckdb_extensions=(),
+    )
+    inventory = CatalogInventory(
+        lakes=(
+            LakeInventory(
+                metadata_schema="lake",
+                latest_snapshot_id=1,
+                latest_snapshot_at=None,
+                scheduled_files=0,
+                oldest_scheduled_at=None,
+                tables=(),
+            ),
+        )
+    )
+    collector = MaintenanceInventory(
+        storage,
+        orphan_cleanup_enabled=False,
+    )
+
+    with (
+        patch("lakeducktor.inventory.inventory_catalog", return_value=inventory),
+        patch("lakeducktor.inventory._orphan_files") as orphan_probe,
+    ):
+        result = collector(Mock(), detection)
+
+    assert result.lakes[0].orphan_files == 0
+    orphan_probe.assert_not_called()
+
+
+def test_one_shot_inventory_honors_orphan_cleanup_environment(monkeypatch):
+    from lakeducktor.config import StorageConfiguration
+    from lakeducktor.inventory import MaintenanceInventory
+
+    monkeypatch.delenv("ORPHAN_CLEANUP_ENABLED", raising=False)
+    inventory = MaintenanceInventory(StorageConfiguration(provider="filesystem"))
+    assert inventory.orphan_cleanup_enabled is False
+    monkeypatch.setenv("ORPHAN_CLEANUP_ENABLED", "true")
+    assert MaintenanceInventory(inventory.storage).orphan_cleanup_enabled is True

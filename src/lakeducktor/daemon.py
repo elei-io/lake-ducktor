@@ -819,6 +819,7 @@ def run_service(
     maintenance_inventory = MaintenanceInventory(
         storage,
         orphan_scan_interval_seconds=configuration.orphan_scan_interval_seconds,
+        orphan_cleanup_enabled=configuration.orphan_cleanup_enabled,
         orphan_probe_observer=telemetry.orphan_probe_completed,
     )
     restore_signals = _install_signal_handlers(stop_event, telemetry)
@@ -828,10 +829,12 @@ def run_service(
         _LOGGER.info(
             "worker_started poll_interval_seconds=%.3f "
             "treatment_stuck_after_seconds=%.3f "
-            "orphan_scan_interval_seconds=%.3f metrics=%s:%s",
+            "orphan_scan_interval_seconds=%.3f "
+            "orphan_cleanup_enabled=%s metrics=%s:%s",
             configuration.poll_interval_seconds,
             configuration.treatment_stuck_after_seconds,
             configuration.orphan_scan_interval_seconds,
+            configuration.orphan_cleanup_enabled,
             host,
             port,
         )

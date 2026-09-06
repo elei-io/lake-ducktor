@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isfinite
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -76,6 +76,24 @@ def _positive_float(
     return value
 
 
+def _boolean(
+    environment: Mapping[str, str],
+    name: str,
+    default: bool,
+) -> bool:
+    raw_value = environment.get(name, str(default)).strip().lower()
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be a boolean")
+
+
+def orphan_cleanup_from_environment() -> bool:
+    """Use the same orphan policy for one-shot commands and the service."""
+    return _boolean(os.environ, "ORPHAN_CLEANUP_ENABLED", False)
+
+
 @dataclass(frozen=True, slots=True)
 class MetadataConfiguration:
     """Inputs required to locate an existing DuckLake metadata catalogue."""
@@ -84,10 +102,11 @@ class MetadataConfiguration:
     host: str
     port: int
     username: str
-    password: str
+    password: str = field(repr=False)
     database: str
     schema: str | None = None
     maintain_lakes: tuple[str, ...] = ()
+    maintain_all_lakes: bool = False
 
     @classmethod
     def from_environment(
@@ -125,6 +144,7 @@ class MetadataConfiguration:
             database=_required(values, "METADATA_DATABASE_NAME"),
             schema=schema,
             maintain_lakes=_comma_separated(values, "MAINTAIN_LAKES"),
+            maintain_all_lakes=_boolean(values, "MAINTAIN_ALL_LAKES", False),
         )
 
     def postgres_uri(self) -> str:
@@ -137,6 +157,19 @@ class MetadataConfiguration:
         return f"postgresql://{username}:{password}@{host}:{self.port}/{database}"
 
 
+def require_maintenance_scope(configuration: MetadataConfiguration) -> None:
+    """Require explicit scope before a CLI command can mutate a lake."""
+    if not (
+        configuration.schema
+        or configuration.maintain_lakes
+        or configuration.maintain_all_lakes
+    ):
+        raise ConfigurationError(
+            "maintenance requires MAINTAIN_LAKES or METADATA_DATABASE_SCHEMA; "
+            "set MAINTAIN_ALL_LAKES=true only to maintain every discovered lake"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class StorageConfiguration:
     """Storage access required by a writable DuckLake attachment."""
@@ -145,8 +178,8 @@ class StorageConfiguration:
     data_path: str | None = None
     endpoint: str = ""
     region: str = ""
-    access_key_id: str = ""
-    secret_access_key: str = ""
+    access_key_id: str = field(default="", repr=False)
+    secret_access_key: str = field(default="", repr=False)
     bucket: str = ""
     use_ssl: bool = False
 
@@ -177,13 +210,14 @@ class StorageConfiguration:
             raise ConfigurationError(
                 "CATALOG_STORAGE_ENDPOINT must be an http or https URL"
             )
-        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        if parsed.query or parsed.fragment:
             raise ConfigurationError(
-                "CATALOG_STORAGE_ENDPOINT must not contain a path, query, or fragment"
+                "CATALOG_STORAGE_ENDPOINT must not contain a query or fragment"
             )
+        endpoint = f"{parsed.netloc}{parsed.path.rstrip('/')}"
         return cls(
             provider=provider,
-            endpoint=parsed.netloc,
+            endpoint=endpoint,
             region=_required(values, "CATALOG_STORAGE_REGION"),
             access_key_id=_required(values, "CATALOG_STORAGE_ACCESS_KEY_ID"),
             secret_access_key=_required(
@@ -206,6 +240,7 @@ class RunConfiguration:
     conflict_backoff_base_seconds: float = 5.0
     conflict_backoff_max_seconds: float = 60.0
     orphan_scan_interval_seconds: float = 3_600.0
+    orphan_cleanup_enabled: bool = False
 
     @classmethod
     def from_environment(
@@ -257,5 +292,10 @@ class RunConfiguration:
                 values,
                 "ORPHAN_SCAN_INTERVAL_SECONDS",
                 3_600,
+            ),
+            orphan_cleanup_enabled=_boolean(
+                values,
+                "ORPHAN_CLEANUP_ENABLED",
+                False,
             ),
         )

@@ -11,7 +11,11 @@ from typing import Protocol
 
 import duckdb
 
-from lakeducktor.config import MetadataConfiguration, StorageConfiguration
+from lakeducktor.config import (
+    MetadataConfiguration,
+    StorageConfiguration,
+    orphan_cleanup_from_environment,
+)
 from lakeducktor.duckdb_config import connection_config
 from lakeducktor.model import (
     BackendDetection,
@@ -974,6 +978,9 @@ class MaintenanceInventory:
 
     storage: StorageConfiguration
     orphan_scan_interval_seconds: float | None = None
+    orphan_cleanup_enabled: bool = field(
+        default_factory=orphan_cleanup_from_environment
+    )
     clock: Callable[[], float] = monotonic
     orphan_probe_observer: Callable[[bool], None] | None = None
     _orphan_files_by_lake: dict[str, int] = field(default_factory=dict)
@@ -985,15 +992,19 @@ class MaintenanceInventory:
         detection: BackendDetection,
     ) -> CatalogInventory:
         now = self.clock()
-        due = frozenset(
-            schema
-            for schema in detection.metadata_schemas
-            if self.orphan_scan_interval_seconds is None
-            or schema not in self._orphan_scanned_at
-            or (
-                now - self._orphan_scanned_at[schema]
-                >= self.orphan_scan_interval_seconds
+        due = (
+            frozenset(
+                schema
+                for schema in detection.metadata_schemas
+                if self.orphan_scan_interval_seconds is None
+                or schema not in self._orphan_scanned_at
+                or (
+                    now - self._orphan_scanned_at[schema]
+                    >= self.orphan_scan_interval_seconds
+                )
             )
+            if self.orphan_cleanup_enabled
+            else frozenset()
         )
         inventory = inventory_catalog(
             configuration,
