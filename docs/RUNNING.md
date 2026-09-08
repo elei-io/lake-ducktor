@@ -132,30 +132,51 @@ one-shot commands for smoke tests, and start the worker with:
 docker compose -f compose.yml -f compose.filesystem.yml up lakeducktor
 ```
 
-## Alluxio S3 proxy
+## Periplus local development with VersityGW
 
-LakeDucktor can maintain a lake through the same Alluxio S3 proxy used by its
-writers. It must connect to both the existing DuckLake metadata database and
-the S3 proxy; access to Alluxio or its under-store alone is not enough to
-identify the lake.
+LakeDucktor uses the existing Periplus VersityGW service and DuckLake metadata
+PostgreSQL database. Start Periplus's local stack and initialize its lake first,
+then copy `.env.example` to `.env`. The example matches Periplus's local defaults:
 
-Join the network shared by the metadata database and S3 proxy. Configure
-`METADATA_DATABASE_*` for the existing PostgreSQL database and
-`CATALOG_STORAGE_*` for the proxy's endpoint, bucket, and credentials. Set
-`MAINTAIN_LAKES` to the intended schema and `LAKEDUCKTOR_DOCKER_NETWORK` to that
-network's name. See `.env.example` for the complete variable names.
+| Setting | Host | LakeDucktor Compose container |
+| --- | --- | --- |
+| Metadata host and port | `localhost:55433` | `lake-postgres:5432` |
+| S3 endpoint | `http://localhost:7070` | `http://lake-s3:7070` |
+| Metadata database / schema | `lake` / `ducklake` | `lake` / `ducklake` |
+| S3 bucket / region | `lake` / `us-east-1` | `lake` / `us-east-1` |
 
-No lake volume is mounted for S3-compatible storage. Run `inventory` first to
-verify the attachment without mutating the lake, then start the worker:
+Compose joins the existing `periplus_default` network. If Periplus uses a
+custom Compose project name, update `LAKEDUCKTOR_DOCKER_NETWORK` accordingly.
+`CONTAINER_METADATA_DATABASE_HOST`, `CONTAINER_METADATA_DATABASE_PORT`, and
+`CONTAINER_CATALOG_STORAGE_ENDPOINT` supply the container addresses while the
+ordinary settings remain usable by host-side commands. Without a container
+endpoint override, Compose uses `CATALOG_STORAGE_ENDPOINT`.
+
+Match the metadata credentials to Periplus's `LAKE_POSTGRES_USER` and
+`LAKE_POSTGRES_PASSWORD`, and the S3 credentials to `LAKE_S3_KEY_ID` and
+`LAKE_S3_SECRET_ACCESS_KEY`. Match any database or published-port overrides too.
+Use the DuckLake metadata database, not `periplus-postgres`, which stores
+Periplus control state. Keep `MAINTAIN_LAKES=ducklake` to select the lake schema.
+
+VersityGW uses plain HTTP and path-style S3 requests locally; LakeDucktor derives
+TLS from the endpoint URL and already configures path-style requests. The
+endpoint has no `/api/v1/s3` suffix. The `lake` bucket owns DuckLake data;
+Periplus's separate `raw` bucket is not a maintenance target.
+
+No lake volume is mounted for S3-compatible storage. All maintenance reads,
+compaction outputs, and file deletions go through VersityGW, which stores the
+local objects in Periplus's `lake-s3-data` volume. Run a read-only inventory
+before starting the worker:
 
 ```sh
+docker compose build
 docker compose run --rm lakeducktor inventory
 docker compose up lakeducktor
 ```
 
-All maintenance reads, compaction outputs, and file deletions use that proxy.
-Consequently, Alluxio's write type, replication, persistence, and under-store
-settings remain the storage authority for LakeDucktor operations too.
+For host-side inventory, use `uv run lakeducktor inventory` with the same `.env`.
+The image includes the compatibility backport described in
+[DuckLake compatibility pin](DUCKLAKE_COMPATIBILITY.md).
 
 ## First-run scope and policy
 

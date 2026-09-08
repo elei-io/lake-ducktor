@@ -55,6 +55,26 @@ for shared data roots.
 
 ## Supported setup
 
+### Container image
+
+After lint, unit tests, package build, integration demo, and secret scanning pass,
+CI publishes `ghcr.io/elei-io/lake-ducktor` for Linux/AMD64:
+
+- `latest` tracks successful builds from `main`.
+- `v*` Git tags publish the matching image tag, such as `v0.1.0`.
+- Every published build also receives `sha-<full-commit-sha>`.
+
+Use a commit tag or image digest to pin deployments. The image includes the
+patched DuckLake extension and defaults to `lakeducktor run`. Configure it using
+the settings in [`.env.example`](.env.example). Deployment infrastructure lives
+outside this repository.
+
+Publishing uses the workflow's `GITHUB_TOKEN`; no registry password secret is
+required. If the GHCR package is private, consumers need registry credentials.
+Package visibility can be changed in GitHub's package settings.
+
+### Compatibility
+
 | Area | Current implementation |
 | --- | --- |
 | Metadata | PostgreSQL; SQLite/DuckDB capability classes are not supported attachment paths |
