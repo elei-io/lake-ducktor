@@ -526,7 +526,16 @@ def test_run_loop_retries_failures_after_the_same_interruptible_wait() -> None:
     ]
 
 
-def test_transient_conflicts_use_bounded_exponential_backoff() -> None:
+@pytest.mark.parametrize(
+    "reason",
+    [
+        ExecutionFailureReason.CONCURRENT_COMPACTION,
+        ExecutionFailureReason.TRANSACTION_CONFLICT,
+    ],
+)
+def test_transient_conflicts_use_bounded_exponential_backoff(
+    reason: ExecutionFailureReason,
+) -> None:
     stop_event = CountingStopEvent(3)
     observer = RecordingObserver()
     configuration = RunConfiguration(
@@ -541,7 +550,7 @@ def test_transient_conflicts_use_bounded_exponential_backoff() -> None:
     def fail() -> MaintenanceOutcome:
         raise MaintenanceError(
             "compaction conflict",
-            reason=ExecutionFailureReason.CONCURRENT_COMPACTION,
+            reason=reason,
         )
 
     run_loop(
@@ -557,9 +566,9 @@ def test_transient_conflicts_use_bounded_exponential_backoff() -> None:
         for event in observer.events
         if isinstance(event, tuple) and event[0] == "retry_scheduled"
     ] == [
-        ("retry_scheduled", ExecutionFailureReason.CONCURRENT_COMPACTION, 5),
-        ("retry_scheduled", ExecutionFailureReason.CONCURRENT_COMPACTION, 10),
-        ("retry_scheduled", ExecutionFailureReason.CONCURRENT_COMPACTION, 12),
+        ("retry_scheduled", reason, 5),
+        ("retry_scheduled", reason, 10),
+        ("retry_scheduled", reason, 12),
     ]
 
 

@@ -33,6 +33,7 @@ _DUCKLAKE_RETRY_BACKOFF = 1.2
 
 class ExecutionFailureReason(StrEnum):
     CONCURRENT_COMPACTION = "concurrent_compaction"
+    TRANSACTION_CONFLICT = "transaction_conflict"
     INTERRUPTED = "interrupted"
     RESOURCE_EXHAUSTED = "resource_exhausted"
     SNAPSHOT_RETRY_EXHAUSTED = "snapshot_retry_exhausted"
@@ -42,6 +43,7 @@ class ExecutionFailureReason(StrEnum):
 
 _TRANSIENT_REASONS = {
     ExecutionFailureReason.CONCURRENT_COMPACTION,
+    ExecutionFailureReason.TRANSACTION_CONFLICT,
     ExecutionFailureReason.SNAPSHOT_RETRY_EXHAUSTED,
 }
 
@@ -93,6 +95,14 @@ def classify_duckdb_error(error: duckdb.Error) -> ExecutionFailureReason:
         or "ducklake_snapshot_pkey" in message
     ):
         return ExecutionFailureReason.SNAPSHOT_RETRY_EXHAUSTED
+    if "transaction conflict" in message and any(
+        marker in message
+        for marker in (
+            "another transaction has inserted",
+            "another transaction has deleted",
+        )
+    ):
+        return ExecutionFailureReason.TRANSACTION_CONFLICT
     if "out of memory" in message or "failed to allocate" in message:
         return ExecutionFailureReason.RESOURCE_EXHAUSTED
     if any(

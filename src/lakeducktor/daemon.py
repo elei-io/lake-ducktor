@@ -105,6 +105,7 @@ class MaintenanceError(RuntimeError):
     def transient(self) -> bool:
         return self.reason in {
             ExecutionFailureReason.CONCURRENT_COMPACTION,
+            ExecutionFailureReason.TRANSACTION_CONFLICT,
             ExecutionFailureReason.SNAPSHOT_RETRY_EXHAUSTED,
         }
 

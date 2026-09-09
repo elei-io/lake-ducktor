@@ -322,6 +322,17 @@ def test_filesystem_executor_overrides_data_path_without_s3_setup() -> None:
         ),
         ("Out of Memory Error", ExecutionFailureReason.RESOURCE_EXHAUSTED),
         ("HTTP Error reading S3", ExecutionFailureReason.STORAGE_ERROR),
+        (
+            'Transaction conflict - attempting to delete from table with index "18" '
+            "- but another transaction has inserted into it",
+            ExecutionFailureReason.TRANSACTION_CONFLICT,
+        ),
+        (
+            'Transaction conflict - attempting to compact table with index "18" '
+            "- but another transaction has deleted from it",
+            ExecutionFailureReason.TRANSACTION_CONFLICT,
+        ),
+        ("Transaction conflict with unknown cause", ExecutionFailureReason.UNKNOWN),
         ("binder failed", ExecutionFailureReason.UNKNOWN),
     ],
 )

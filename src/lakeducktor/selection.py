@@ -229,13 +229,33 @@ def _merge_selection(
                 group.merge_candidate_files for group in productive_groups
             )
             input_memory_limit = usable_memory // _SORTED_MERGE_INPUT_MEMORY_MULTIPLIER
+            admitted_files = largest_group_files
+            admitted_bytes = largest_group_bytes
             if (
                 input_memory_limit <= 0
                 or largest_group_bytes > input_memory_limit
                 or largest_group_bytes > execution_target
                 or largest_group_files > _MAXIMUM_MERGE_INPUT_FILES
             ):
-                return None
+                # Native batching stops AFTER adding the file crossing the target.
+                # max_file_size excludes inputs >= target, so a batch is strictly
+                # below twice the target. Use a measured minimum, never an average,
+                # to bound the number of files that can reach that target.
+                minimum = candidate.minimum_input_file_bytes
+                if minimum <= 0:
+                    return None
+                execution_target = min(
+                    execution_target,
+                    input_memory_limit // 2,
+                    minimum * _MAXIMUM_MERGE_INPUT_FILES,
+                )
+                if execution_target <= minimum:
+                    return None
+                admitted_files = min(
+                    largest_group_files,
+                    (execution_target + minimum - 1) // minimum,
+                )
+                admitted_bytes = min(largest_group_bytes, 2 * execution_target - 2)
             return TreatmentSelection(
                 kind=TreatmentKind.MERGE,
                 priority_rank=candidate.rank,
@@ -244,7 +264,7 @@ def _merge_selection(
                 schema_name=candidate.schema_name,
                 table_name=candidate.table_name,
                 input_bytes=candidate.input_bytes,
-                admitted_bytes=largest_group_bytes,
+                admitted_bytes=admitted_bytes,
                 sorting_enabled=True,
                 memory_headroom_bytes=headroom,
                 usable_memory_bytes=usable_memory,
@@ -252,7 +272,7 @@ def _merge_selection(
                 input_files=candidate.input_files,
                 lake_target_file_size_bytes=candidate.target_file_size_bytes,
                 execution_target_file_size_bytes=execution_target,
-                admitted_input_files=largest_group_files,
+                admitted_input_files=admitted_files,
             )
         admitted_files = 0
         admitted_bytes = 0

@@ -546,3 +546,12 @@ are now automated through native policy:
 
 Those areas require their own evidence before conclusions from compaction are
 generalized to them.
+
+Sorted merges retain the same 512-input guard. When a whole compatible group
+exceeds admission limits, a session-only target bounds a partial merge using
+the observed minimum input file size. The byte allowance reserves space for
+the last input crossing the target (less than twice the target with the native
+size filter). The eightfold sorted-input allowance remains in force. Missing
+minimum-size evidence leaves oversized sorted groups deferred. Native regression
+coverage is in `tests/native_sorted_batches.py`; it checks repeated progress,
+row and snapshot preservation, and unchanged persisted lake options.
