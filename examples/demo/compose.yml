@@ -47,6 +47,7 @@ services:
       ORPHAN_CLEANUP_ENABLED: "false"
     volumes:
       - ./demo.py:/demo/demo.py:ro
+      - ../../tests/native_sorted_batches.py:/app/tests/native_sorted_batches.py:ro
       - lake:/home/lakeducktor/demo-lake
 
 volumes:

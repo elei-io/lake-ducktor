@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import runpy
 import subprocess
 
 import duckdb
@@ -39,6 +40,7 @@ def snapshot():
 
 
 def main():
+    runpy.run_path("/app/tests/native_sorted_batches.py", run_name="__main__")
     with connect() as connection:
         connection.execute("CREATE TABLE lake.main.demo (id BIGINT, payload VARCHAR)")
         connection.execute("CALL lake.set_option('data_inlining_row_limit', 0)")

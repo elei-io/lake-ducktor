@@ -483,3 +483,54 @@ def test_sorted_merge_without_compatible_groups_is_not_admitted() -> None:
     assert sorted_selection is None
     assert unsorted_selection.max_compacted_files == 1
     assert unsorted_selection.admitted_bytes == 2_500_000_000
+
+
+@pytest.mark.parametrize("files,size", [(719, 45_230_153), (3243, 165_422_534)])
+def test_sorted_oversized_group_admits_bounded_partial_batch(files, size) -> None:
+    candidate = replace(
+        merge(
+            1,
+            1,
+            target=536_870_912,
+            minimum=1000,
+            input_groups=(CompatibleFileGroup(1, 1, files, size, files, size),),
+        ),
+        sorting_enabled=True,
+        input_files=files,
+        input_bytes=size,
+        expected_files_eliminated=files - 1,
+    )
+    selected = select_treatment(
+        plan(merges=(candidate,)), ResourceEnvelope(1, "2GB", 2_000_000_000)
+    ).selected
+    assert selected is not None
+    assert selected.max_compacted_files == 1
+    assert selected.admitted_input_files <= 512
+    assert selected.execution_target_file_size_bytes == 512_000
+    assert selected.admitted_bytes == 1_023_998
+    assert selected.admitted_bytes * 8 <= selected.usable_memory_bytes
+
+
+def test_sorted_batch_memory_bound_includes_last_file_overshoot() -> None:
+    candidate = replace(
+        merge(
+            1,
+            1,
+            target=536_870_912,
+            minimum=1_000_000,
+            input_groups=(
+                CompatibleFileGroup(1, 1, 1000, 1_000_000_000, 1000, 1_000_000_000),
+            ),
+        ),
+        sorting_enabled=True,
+        input_files=1000,
+        input_bytes=1_000_000_000,
+        expected_files_eliminated=998,
+    )
+    selected = select_treatment(
+        plan(merges=(candidate,)), ResourceEnvelope(1, "2GB", 2_000_000_000)
+    ).selected
+    assert selected is not None
+    assert selected.execution_target_file_size_bytes == 62_500_000
+    assert selected.admitted_input_files == 63
+    assert selected.admitted_bytes == 124_999_998
