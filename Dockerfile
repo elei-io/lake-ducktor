@@ -31,10 +31,11 @@ RUN git clone --filter=blob:none https://github.com/duckdb/ducklake.git \
     && git clone --depth 1 --branch "${DUCKDB_EXTENSION_BUILD_VERSION}" \
        https://github.com/duckdb/duckdb.git duckdb
 
-COPY vendor/ducklake/0001-external-hive-compaction.patch /tmp/
+COPY vendor/ducklake/*.patch /tmp/
 
 RUN cd ducklake \
     && git apply /tmp/0001-external-hive-compaction.patch \
+    && git apply /tmp/0002-productive-compaction-batches.patch \
     && DISABLE_EXTENSIONS_FOR_TEST=1 cmake -G Ninja \
        -DEXTENSION_STATIC_BUILD=1 \
        -DDUCKDB_EXTENSION_CONFIGS=/build/ducklake/extension_config.cmake \

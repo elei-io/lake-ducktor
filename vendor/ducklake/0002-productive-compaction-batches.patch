@@ -1,0 +1,79 @@
+--- a/src/functions/ducklake_compaction_functions.cpp
++++ b/src/functions/ducklake_compaction_functions.cpp
+@@ -5,6 +5,7 @@
+ #include "storage/ducklake_table_entry.hpp"
+ #include "storage/ducklake_insert.hpp"
+ #include "storage/ducklake_partition_data.hpp"
++#include <algorithm>
+ #include "storage/ducklake_multi_file_reader.hpp"
+ #include "duckdb/planner/operator/logical_get.hpp"
+ #include "duckdb/planner/operator/logical_copy_to_file.hpp"
+@@ -313,7 +314,7 @@
+ 	}
+ 	// we have gathered all the candidate files per compaction group
+ 	// iterate over them to generate actual compaction commands
+-	uint64_t compacted_files = 0;
++	vector<vector<idx_t>> batches;
+ 	for (auto &entry : candidates) {
+ 		auto &candidate_list = entry.second.candidate_files;
+ 		if (candidate_list.size() <= 1) {
+@@ -340,31 +341,38 @@
+ 				current_file_size += file_size;
+ 			}
+ 
+-			if (start_idx < compaction_idx) {
+-				idx_t compaction_file_count = compaction_idx - start_idx;
+-				if (compaction_file_count == 1) {
+-					// If we only have one file to compact, we have nothing to compact
+-					compacted_files++;
+-					if (compacted_files >= options.max_files) {
+-						break;
+-					}
+-					continue;
++			if (compaction_idx - start_idx > 1) {
++				vector<idx_t> batch;
++				for (idx_t i = start_idx; i < compaction_idx; i++) {
++					batch.push_back(candidate_list[i]);
+ 				}
+-				vector<DuckLakeCompactionFileEntry> compaction_files;
+-				for (idx_t i = start_idx; i < compaction_idx; i++) {
+-					compaction_files.push_back(std::move(files[candidate_list[i]]));
+-				}
+-				compactions.push_back(GenerateCompactionCommand(std::move(compaction_files)));
+-				start_idx += compaction_file_count - 1;
+-			}
+-			compacted_files++;
+-			if (compacted_files >= options.max_files) {
+-				break;
+-			}
+-		}
++				batches.push_back(std::move(batch));
++			}
++			if (compaction_idx > start_idx) {
++				start_idx = compaction_idx - 1;
++			}
++		}
++	}
++	// Apply the output limit to productive batches, not hash-map iteration order.
++	// Preserve native size/compatibility boundaries and file order within each batch.
++	std::sort(batches.begin(), batches.end(), [](const vector<idx_t> &a, const vector<idx_t> &b) {
++		if (a.size() != b.size()) {
++			return a.size() > b.size();
++		}
++		// Metadata input is ordered by snapshot, row ID and file ID.
++		return a.front() < b.front();
++	});
++	uint64_t compacted_files = 0;
++	for (auto &batch : batches) {
+ 		if (compacted_files >= options.max_files) {
+ 			break;
+ 		}
++		vector<DuckLakeCompactionFileEntry> compaction_files;
++		for (auto file_idx : batch) {
++			compaction_files.push_back(std::move(files[file_idx]));
++		}
++		compactions.push_back(GenerateCompactionCommand(std::move(compaction_files)));
++		compacted_files++;
+ 	}
+ }
+ 

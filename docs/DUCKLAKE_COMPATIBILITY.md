@@ -15,6 +15,15 @@ The reproducible build pins:
 
 The adapted patch is vendored at
 [`vendor/ducklake/0001-external-hive-compaction.patch`](../vendor/ducklake/0001-external-hive-compaction.patch).
+The bounded-compaction selection patch is vendored at
+[`vendor/ducklake/0002-productive-compaction-batches.patch`](../vendor/ducklake/0002-productive-compaction-batches.patch).
+It ranks native merge batches by files eliminated before applying
+`max_compacted_files`, with oldest input first as a deterministic tie-breaker.
+The native partition/schema boundaries, size filters, batch-size construction and
+Ducktor memory admission remain unchanged. Only selected batches are bound for
+execution. This prevents newly arriving pairs from repeatedly winning over larger
+backlogs through hash-map iteration order.
+
 The image builds a self-contained extension against the pinned DuckDB headers.
 This avoids expiring CI artifact URLs and mismatched DuckDB extension ABIs.
 
@@ -54,6 +63,11 @@ the fix. Retire the patch only when all of these conditions are true:
 
 The ordinary disposable demo is not sufficient for this decision because it
 creates its source files inside DuckLake's managed data path.
+
+The productive-batch patch has an independent retirement gate: the signed extension
+must also pass `tests/native_sorted_batches.py`, including the 40-file group versus
+new two-file groups and the bounded 600-file regression. Preserve this patch and
+the source build until both fixes are present and verified.
 
 After those checks pass:
 
