@@ -18,6 +18,10 @@ material in the patch and the DuckLake extension built by the Dockerfile.
 See [compatibility details](docs/DUCKLAKE_COMPATIBILITY.md) for the build pins
 and the reason for the adaptation.
 
+`vendor/ducklake/0002-productive-compaction-batches.patch` changes merge batch
+selection against the same pinned DuckLake source. The upstream MIT notice also
+applies to the source context in this patch.
+
 ## Dependencies and container distributions
 
 Python dependencies, DuckDB extensions, native libraries, and operating-system

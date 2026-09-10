@@ -14,7 +14,65 @@ from lakeducktor.model import (
 from lakeducktor.selection import select_treatment
 
 
+def check_productive_batches():
+    """A bounded call must clear the large backlog before newly arriving pairs."""
+    with tempfile.TemporaryDirectory(prefix="ducktor-priority-") as directory:
+        c = duckdb.connect(config={"allow_unsigned_extensions": "true"})
+        c.execute("LOAD ducklake")
+        c.execute("SET memory_limit = '128MB'")
+        c.execute("SET threads = 1")
+        c.execute(f"ATTACH 'ducklake:{directory}/catalog.duckdb' AS lake")
+        c.execute("CALL lake.set_option('data_inlining_row_limit', 0)")
+        c.execute("CREATE TABLE lake.t (p INTEGER, id INTEGER)")
+        c.execute("ALTER TABLE lake.t SET PARTITIONED BY (p)")
+        c.execute("ALTER TABLE lake.t SET SORTED BY (id)")
+        for i in range(40):
+            c.execute("INSERT INTO lake.t VALUES (0, ?)", [i])
+        for partition in range(1, 16):
+            for i in range(2):
+                c.execute("INSERT INTO lake.t VALUES (?, ?)", [partition, i])
+        before = c.execute("SELECT * FROM lake.t ORDER BY p, id").fetchall()
+        snapshot = c.execute(
+            "SELECT id FROM ducklake_current_snapshot('lake')"
+        ).fetchone()[0]
+        policy = c.execute("SELECT * FROM lake.options()").fetchall()
+        result = c.execute(
+            "SELECT files_processed, files_created "
+            "FROM ducklake_merge_adjacent_files('lake', 't', max_compacted_files => 1)"
+        ).fetchall()
+        assert result == [(40, 1)], f"small groups won over the backlog: {result}"
+        # Continued small writes must neither lose rows nor change the output bound.
+        c.execute("INSERT INTO lake.t VALUES (16, 0)")
+        c.execute("INSERT INTO lake.t VALUES (16, 1)")
+        result = c.execute(
+            "SELECT files_processed, files_created "
+            "FROM ducklake_merge_adjacent_files('lake', 't', max_compacted_files => 3)"
+        ).fetchall()
+        assert result == [(2, 1)] * 3, result
+        c.execute("CALL ducklake_merge_adjacent_files('lake', 't')")
+        assert (
+            c.execute(
+                "SELECT * FROM ducklake_merge_adjacent_files("
+                "'lake', 't', max_compacted_files => 1)"
+            ).fetchall()
+            == []
+        )
+        assert c.execute("SELECT * FROM lake.t ORDER BY p, id").fetchall() == (
+            before + [(16, 0), (16, 1)]
+        )
+        assert (
+            c.execute(
+                f"SELECT * FROM lake.t AT (VERSION => {snapshot}) ORDER BY p, id"
+            ).fetchall()
+            == before
+        )
+        assert c.execute("SELECT * FROM lake.options()").fetchall() == policy
+        c.close()
+        print("Productive batch regression passed: 40 files merged before pairs.")
+
+
 def main():
+    check_productive_batches()
     with tempfile.TemporaryDirectory(prefix="ducktor-batches-") as directory:
         c = duckdb.connect(config={"allow_unsigned_extensions": "true"})
         c.execute("LOAD ducklake")
