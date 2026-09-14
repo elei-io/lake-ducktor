@@ -71,7 +71,93 @@ def check_productive_batches():
         print("Productive batch regression passed: 40 files merged before pairs.")
 
 
+def check_small_group_with_tiny_file():
+    """Known small groups must not inherit a hypothetical 512-file batch bound."""
+    with tempfile.TemporaryDirectory(prefix="ducktor-tiny-file-") as directory:
+        c = duckdb.connect(config={"allow_unsigned_extensions": "true"})
+        c.execute("LOAD ducklake")
+        c.execute("SET memory_limit = '512MB'")
+        c.execute("SET threads = 1")
+        c.execute(f"ATTACH 'ducklake:{directory}/catalog.duckdb' AS lake")
+        c.execute("CALL lake.set_option('data_inlining_row_limit', 0)")
+        c.execute("CREATE TABLE lake.t (id BIGINT, payload VARCHAR)")
+        c.execute("ALTER TABLE lake.t SET SORTED BY (id)")
+        c.execute("INSERT INTO lake.t VALUES (-1, 'tiny')")
+        for start in (0, 50000):
+            c.execute(
+                "INSERT INTO lake.t SELECT i, md5(i::VARCHAR) FROM range(?, ?) t(i)",
+                [start, start + 50000],
+            )
+        sizes = [
+            row[0]
+            for row in c.execute(
+                "SELECT data_file_size_bytes FROM ducklake_list_files('lake', 't')"
+            ).fetchall()
+        ]
+        assert len(sizes) == 3
+        assert sorted(sizes)[1] > min(sizes) * 512, sizes
+        target = max(sizes) + 1
+        c.execute("CALL lake.set_option('target_file_size', ?)", [f"{target}B"])
+        before = c.execute("SELECT * FROM lake.t ORDER BY id").fetchall()
+        snapshot = c.execute(
+            "SELECT id FROM ducklake_current_snapshot('lake')"
+        ).fetchone()[0]
+        policy = c.execute("SELECT * FROM lake.options()").fetchall()
+        size = sum(sizes)
+        candidate = MergePriority(
+            rank=1,
+            metadata_schema="lake",
+            table_id=1,
+            schema_name="main",
+            table_name="t",
+            state=PriorityState.RUNNABLE,
+            blocked_by=None,
+            groups=1,
+            input_files=3,
+            input_bytes=size,
+            average_input_file_bytes=size // 3,
+            target_file_size_bytes=target,
+            expected_files_eliminated=1,
+            recent_data_files_60s=0,
+            activity_penalty=0,
+            adjusted_expected_files_eliminated=1,
+            sorting_enabled=True,
+            minimum_input_file_bytes=min(sizes),
+            input_groups=(
+                CompatibleFileGroup(1, 1, 3, size, 3, size, sorted(sizes)[1]),
+            ),
+        )
+        selected = select_treatment(
+            PriorityPlan((), (candidate,), 0, 0),
+            ResourceEnvelope(1, "512MB", 512_000_000),
+        ).selected
+        assert selected is not None, "tiny file blocked a three-file group"
+        assert selected.execution_target_file_size_bytes == target
+        assert selected.admitted_input_files == 3
+        c.execute("SET ducklake_target_file_size = ?", [f"{target}B"])
+        result = c.execute(
+            "SELECT files_processed, files_created FROM ducklake_merge_adjacent_files("
+            "'lake', 't', max_compacted_files => 1, max_file_size => ?)",
+            [target],
+        ).fetchall()
+        assert result and all(2 <= n <= 3 and outputs == 1 for n, outputs in result), (
+            result
+        )
+        assert len(result) == 1
+        assert c.execute("SELECT * FROM lake.t ORDER BY id").fetchall() == before
+        assert (
+            c.execute(
+                f"SELECT * FROM lake.t AT (VERSION => {snapshot}) ORDER BY id"
+            ).fetchall()
+            == before
+        )
+        assert c.execute("SELECT * FROM lake.options()").fetchall() == policy
+        c.close()
+        print("Tiny-file regression passed: bounded merge, rows and history preserved.")
+
+
 def main():
+    check_small_group_with_tiny_file()
     check_productive_batches()
     with tempfile.TemporaryDirectory(prefix="ducktor-batches-") as directory:
         c = duckdb.connect(config={"allow_unsigned_extensions": "true"})
