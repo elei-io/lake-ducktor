@@ -81,6 +81,7 @@ type CompatibleFileGroupRow = tuple[
     int,
     int,
     int,
+    int,
 ]
 type InlinedDataRow = tuple[int, int, int]
 
@@ -611,7 +612,9 @@ class DuckDBInventorySource:
                             < tables.target_file_size_bytes
                     ),
                     0
-                ) AS merge_candidate_bytes
+                ) AS merge_candidate_bytes,
+                coalesce((min(data.file_size_bytes, 2))[2], 0)
+                    AS second_smallest_file_bytes
             FROM active_data_files AS data
             JOIN active_tables AS tables USING (table_id)
             LEFT JOIN snapshot_ranges AS ranges
@@ -655,6 +658,7 @@ def collect_inventory(
                     active_bytes=int(row[4]),
                     merge_candidate_files=int(row[5]),
                     merge_candidate_bytes=int(row[6]),
+                    second_smallest_file_bytes=int(row[7]),
                 )
             )
         inlined_by_table = {

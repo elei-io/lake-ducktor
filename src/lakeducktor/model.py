@@ -93,6 +93,7 @@ class CompatibleFileGroup:
     active_bytes: int
     merge_candidate_files: int
     merge_candidate_bytes: int
+    second_smallest_file_bytes: int = 0
 
 
 @dataclass(frozen=True, slots=True)

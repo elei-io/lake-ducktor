@@ -678,9 +678,14 @@ def run_loop(
     """Drain useful work immediately and wait interruptibly when idle."""
 
     consecutive_conflicts = 0
+    no_progress_tables: dict[tuple[str, int | None], float] = {}
     failure_blocked_tables = blocked_tables if blocked_tables is not None else set()
     try:
         while not stop_event.is_set():
+            for key, deadline in tuple(no_progress_tables.items()):
+                if monotonic() >= deadline:
+                    failure_blocked_tables.discard(key)
+                    del no_progress_tables[key]
             observer.cycle_started()
             should_wait = False
             wait_seconds = configuration.poll_interval_seconds
@@ -756,16 +761,24 @@ def run_loop(
                     and outcome.result.rows_processed == 0
                     and outcome.result.snapshots_processed == 0
                 ):
-                    should_wait = True
-                    _LOGGER.warning(
-                        "worker_idle reason=no_progress poll_seconds=%.3f",
-                        configuration.poll_interval_seconds,
-                    )
+                    selection = outcome.selection
+                    if selection is not None:
+                        key = (selection.metadata_schema, selection.table_id)
+                        if key not in failure_blocked_tables:
+                            no_progress_tables[key] = (
+                                monotonic() + configuration.poll_interval_seconds
+                            )
+                            failure_blocked_tables.add(key)
+                    else:
+                        should_wait = True
+                    _LOGGER.warning("treatment_deferred reason=no_progress")
             if stop_event.is_set():
                 break
             if should_wait:
                 observer.idle(wait_seconds)
                 stop_event.wait(wait_seconds)
+                failure_blocked_tables.difference_update(no_progress_tables)
+                no_progress_tables.clear()
     finally:
         observer.stopped()
 

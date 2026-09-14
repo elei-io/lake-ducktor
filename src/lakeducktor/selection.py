@@ -256,6 +256,13 @@ def _merge_selection(
                     (execution_target + minimum - 1) // minimum,
                 )
                 admitted_bytes = min(largest_group_bytes, 2 * execution_target - 2)
+            # Native max_file_size is exclusive and compatibility is per group.
+            # A lake-target candidate may have no pair below our smaller bound.
+            if not any(
+                group.second_smallest_file_bytes < execution_target
+                for group in productive_groups
+            ):
+                return None
             return TreatmentSelection(
                 kind=TreatmentKind.MERGE,
                 priority_rank=candidate.rank,

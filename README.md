@@ -101,3 +101,15 @@ S3 gateway or catalog/extension combination.
 
 [MIT](LICENSE), copyright (c) 2026 elei.io.
 See [third-party notices](THIRD_PARTY_NOTICES.md) for vendored material.
+
+### Nonproductive merge candidates
+
+Merge admission checks that a compatible pair fits below the actual execution
+file-size limit, which can be smaller than the lake's target under a memory budget.
+The inventory retains only the second-smallest file size per compatible group for
+this check, rather than collecting every file size. Remaining lake-target debt can
+therefore exceed what the current resource budget can execute.
+
+A native treatment that completes without changing anything yields to other tables
+immediately. Its table is deferred for one poll interval and then reconsidered;
+transient deferrals do not clear tables blocked by verified execution failures.

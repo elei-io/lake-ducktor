@@ -700,3 +700,48 @@ def test_run_loop_treats_flushed_rows_as_progress() -> None:
 
     assert cycles == 2
     assert stop_event.waits == [7]
+
+
+def test_empty_merge_yields_to_other_tables_without_global_sleep():
+    from lakeducktor.model import TreatmentSelection
+
+    stop = RecordingStopEvent()
+    observer = RecordingObserver()
+    blocked = set()
+    selection = TreatmentSelection(
+        kind=TreatmentKind.MERGE,
+        priority_rank=1,
+        metadata_schema="lake",
+        table_id=1,
+        schema_name="main",
+        table_name="busy",
+        input_bytes=100,
+        admitted_bytes=100,
+        sorting_enabled=True,
+        memory_headroom_bytes=0,
+        usable_memory_bytes=1000,
+        max_compacted_files=1,
+    )
+    cycles = 0
+
+    def cycle():
+        nonlocal cycles
+        cycles += 1
+        if cycles == 1:
+            return MaintenanceOutcome(
+                state=MaintenanceState.COMPLETED,
+                selection=selection,
+                result=TreatmentResult(0, 0),
+                selection_reason=None,
+                claim_contention=0,
+                duration_seconds=0.1,
+                table_present=True,
+                still_actionable=True,
+            )
+        assert ("lake", 1) in blocked
+        return no_treatment_outcome()
+
+    run_loop(cycle, RunConfiguration(7, 60, "127.0.0.1", 8000), observer, stop, blocked)
+    assert cycles == 2
+    assert stop.waits == [7]
+    assert not blocked
