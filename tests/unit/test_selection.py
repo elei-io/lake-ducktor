@@ -566,3 +566,58 @@ def test_sorted_merge_needs_a_pair_below_actual_execution_limit(second):
     assert decision.selected is not None
     assert decision.selected.table_id == 2
     assert decision.selected.execution_target_file_size_bytes == 250_000_000
+
+
+@pytest.mark.parametrize("files", [7, 512])
+@pytest.mark.parametrize(
+    "memory,target", [(8_000_000_000, 250_000_000), (18_000_000_000, 536_870_912)]
+)
+def test_sorted_small_groups_use_known_file_count_despite_tiny_minimum(
+    files, memory, target
+):
+    size = max(900_000_000, files * 30_000_000)
+    candidate = replace(
+        merge(
+            1,
+            1,
+            target=536_870_912,
+            minimum=2683,
+            input_groups=(
+                CompatibleFileGroup(1, 1, files, size, files, size, 25_000_000),
+                CompatibleFileGroup(1, 2, files, size, files, size, 30_000_000),
+            ),
+        ),
+        sorting_enabled=True,
+        input_files=2 * files,
+        input_bytes=2 * size,
+    )
+    selected = select_treatment(
+        plan(merges=(candidate,)), ResourceEnvelope(2, f"{memory}B", memory)
+    ).selected
+    assert selected is not None
+    assert selected.execution_target_file_size_bytes == target
+    assert selected.admitted_input_files == files
+    assert selected.max_compacted_files == 1
+    assert selected.admitted_bytes * 8 <= selected.usable_memory_bytes
+
+
+def test_sorted_group_above_file_limit_keeps_minimum_based_bound():
+    candidate = replace(
+        merge(
+            1,
+            1,
+            target=536_870_912,
+            minimum=2683,
+            input_groups=(
+                CompatibleFileGroup(
+                    1, 1, 513, 16_000_000_000, 513, 16_000_000_000, 25_000_000
+                ),
+            ),
+        ),
+        sorting_enabled=True,
+    )
+    decision = select_treatment(
+        plan(merges=(candidate,)), ResourceEnvelope(2, "18GB", 18_000_000_000)
+    )
+    assert decision.selected is None
+    assert decision.memory_deferred == 1

@@ -239,16 +239,20 @@ def _merge_selection(
             ):
                 # Native batching stops AFTER adding the file crossing the target.
                 # max_file_size excludes inputs >= target, so a batch is strictly
-                # below twice the target. Use a measured minimum, never an average,
-                # to bound the number of files that can reach that target.
+                # below twice the target. A single output batch cannot contain
+                # more files than its compatible group. Only larger groups need
+                # the minimum-size estimate to enforce the input-file limit.
                 minimum = candidate.minimum_input_file_bytes
                 if minimum <= 0:
                     return None
                 execution_target = min(
                     execution_target,
                     input_memory_limit // 2,
-                    minimum * _MAXIMUM_MERGE_INPUT_FILES,
                 )
+                if largest_group_files > _MAXIMUM_MERGE_INPUT_FILES:
+                    execution_target = min(
+                        execution_target, minimum * _MAXIMUM_MERGE_INPUT_FILES
+                    )
                 if execution_target <= minimum:
                     return None
                 admitted_files = min(

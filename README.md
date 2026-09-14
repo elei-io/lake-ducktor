@@ -106,6 +106,10 @@ See [third-party notices](THIRD_PARTY_NOTICES.md) for vendored material.
 
 Merge admission checks that a compatible pair fits below the actual execution
 file-size limit, which can be smaller than the lake's target under a memory budget.
+Groups already at or below the
+512-input limit use their measured file count; the smallest-file estimate only
+constrains larger groups. A tiny file therefore cannot shrink the execution target
+solely to bound an already-small group.
 The inventory retains only the second-smallest file size per compatible group for
 this check, rather than collecting every file size. Remaining lake-target debt can
 therefore exceed what the current resource budget can execute.
