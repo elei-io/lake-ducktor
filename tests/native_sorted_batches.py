@@ -121,7 +121,9 @@ def main():
                 adjusted_expected_files_eliminated=n - 1,
                 sorting_enabled=True,
                 minimum_input_file_bytes=min(sizes),
-                input_groups=(CompatibleFileGroup(1, 1, n, size, n, size),),
+                input_groups=(
+                    CompatibleFileGroup(1, 1, n, size, n, size, sorted(sizes)[1]),
+                ),
             )
             selected = select_treatment(
                 PriorityPlan((), (candidate,), 0, 0),

@@ -534,3 +534,35 @@ def test_sorted_batch_memory_bound_includes_last_file_overshoot() -> None:
     assert selected.execution_target_file_size_bytes == 62_500_000
     assert selected.admitted_input_files == 63
     assert selected.admitted_bytes == 124_999_998
+
+
+@pytest.mark.parametrize("second", [250_000_000, 300_000_000])
+def test_sorted_merge_needs_a_pair_below_actual_execution_limit(second):
+    candidate = replace(
+        merge(
+            1,
+            1,
+            target=536_870_912,
+            minimum=90_000_000,
+            input_groups=(
+                CompatibleFileGroup(1, 1, 27, 8_000_000_000, 27, 8_000_000_000, second),
+            ),
+        ),
+        sorting_enabled=True,
+    )
+    free = replace(
+        candidate,
+        table_id=2,
+        rank=2,
+        input_groups=(
+            CompatibleFileGroup(
+                1, 1, 27, 8_000_000_000, 27, 8_000_000_000, 100_000_000
+            ),
+        ),
+    )
+    decision = select_treatment(
+        plan(merges=(candidate, free)), ResourceEnvelope(2, "8GB", 8_000_000_000)
+    )
+    assert decision.selected is not None
+    assert decision.selected.table_id == 2
+    assert decision.selected.execution_target_file_size_bytes == 250_000_000

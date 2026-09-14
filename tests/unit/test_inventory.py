@@ -74,7 +74,7 @@ class FakeInventorySource:
             "lake_b": (),
         }
         self.group_rows: dict[str, tuple[CompatibleFileGroupRow, ...]] = {
-            "lake_a": ((7, 1, None, 3, 600, 3, 600),),
+            "lake_a": ((7, 1, None, 3, 600, 3, 600, 200),),
             "lake_b": (),
         }
         self.inlined_rows: dict[str, tuple[InlinedDataRow, ...]] = {
@@ -148,6 +148,7 @@ def test_inventory_builds_immutable_physical_facts_without_a_connection() -> Non
     assert group.partition_id is None
     assert group.merge_candidate_files == 3
     assert group.merge_candidate_bytes == 600
+    assert group.second_smallest_file_bytes == 200
 
     assert inventory.table_count == 1
     assert lake.table_count == 1
