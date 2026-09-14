@@ -762,7 +762,7 @@ def run_loop(
                     and outcome.result.snapshots_processed == 0
                 ):
                     selection = outcome.selection
-                    if selection is not None:
+                    if selection is not None and selection.table_id is not None:
                         key = (selection.metadata_schema, selection.table_id)
                         if key not in failure_blocked_tables:
                             no_progress_tables[key] = (

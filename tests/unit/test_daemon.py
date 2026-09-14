@@ -745,3 +745,43 @@ def test_empty_merge_yields_to_other_tables_without_global_sleep():
     assert cycles == 2
     assert stop.waits == [7]
     assert not blocked
+
+
+def test_empty_lake_wide_treatment_keeps_idle_wait():
+    from lakeducktor.model import TreatmentSelection
+
+    stop = RecordingStopEvent()
+    blocked = set()
+    selection = TreatmentSelection(
+        kind=TreatmentKind.SNAPSHOT_EXPIRATION,
+        priority_rank=1,
+        metadata_schema="lake",
+        table_id=None,
+        schema_name=None,
+        table_name=None,
+        input_bytes=0,
+        admitted_bytes=0,
+        sorting_enabled=False,
+        memory_headroom_bytes=0,
+        usable_memory_bytes=1000,
+        max_compacted_files=None,
+    )
+    outcome = MaintenanceOutcome(
+        state=MaintenanceState.COMPLETED,
+        selection=selection,
+        result=TreatmentResult(0, 0),
+        selection_reason=None,
+        claim_contention=0,
+        duration_seconds=0.1,
+        table_present=None,
+        still_actionable=False,
+    )
+    run_loop(
+        lambda: outcome,
+        RunConfiguration(7, 60, "127.0.0.1", 8000),
+        RecordingObserver(),
+        stop,
+        blocked,
+    )
+    assert stop.waits == [7]
+    assert not blocked
